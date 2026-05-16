@@ -1,0 +1,20 @@
+{
+  "coins": [
+    {
+      "symbol": "OGRE",
+      "name": "Ogre Coin",
+      "chain": "solana",
+      "contract": "5RAZMWd9RiKfodLPQ73cFk4CMoJzTUsATUoRdDThpump",
+      "emoji": "[OGRE]",
+      "website": "https://pump.fun/coin/5RAZMWd9RiKfodLPQ73cFk4CMoJzTUsATUoRdDThpump",
+      "buyUrl": "https://pump.fun/coin/5RAZMWd9RiKfodLPQ73cFk4CMoJzTUsATUoRdDThpump",
+      "channels": [
+        "7392678816"
+      ],
+      "isPrimary": true,
+      "enabled": true,
+      "adText": "Featured: $OGRE is live. Tap to buy."
+    }
+  ],
+  "events": []
+}
