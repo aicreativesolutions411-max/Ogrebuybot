@@ -32,6 +32,8 @@ const {
   HELIUS_POLL_INTERVAL_MS = 15000,
   ENABLE_BITQUERY_STREAM = 'false',
   BITQUERY_TOKEN,
+  ENABLE_PUMPPORTAL_STREAM = 'false',
+  PUMPPORTAL_API_KEY,
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
   ALERT_CHAT_ID,
@@ -51,6 +53,8 @@ const telegramWebhookUrl = TELEGRAM_WEBHOOK_URL ?? (BASE_URL ? `${BASE_URL.repla
 let botUsername = '';
 let bitquerySocket = null;
 let bitqueryRestartTimer = null;
+let pumpPortalSocket = null;
+let pumpPortalRestartTimer = null;
 
 app.use(bot.webhookCallback(telegramWebhookPath));
 app.use(express.json({ limit: '1mb' }));
@@ -185,6 +189,7 @@ bot.command(['setcoin', 'setca'], async (ctx) => {
   });
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
   restartBitqueryStreamSoon();
+  restartPumpPortalStreamSoon();
 
   await ctx.reply([
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
@@ -239,6 +244,7 @@ bot.command('addcoin', async (ctx) => {
   });
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
   restartBitqueryStreamSoon();
+  restartPumpPortalStreamSoon();
 
   await ctx.reply([
     `Added $${coin.symbol} and linked it to this chat.`,
@@ -729,6 +735,88 @@ function restartBitqueryStreamSoon() {
   }, 3000);
 }
 
+async function startPumpPortalStream() {
+  const contracts = await getTrackedContracts();
+  if (contracts.length === 0) {
+    console.warn('PumpPortal stream skipped. No tracked contracts yet.');
+    return;
+  }
+
+  if (pumpPortalSocket) {
+    pumpPortalSocket.close();
+    pumpPortalSocket = null;
+  }
+
+  const url = PUMPPORTAL_API_KEY
+    ? `wss://pumpportal.fun/api/data?api-key=${PUMPPORTAL_API_KEY}`
+    : 'wss://pumpportal.fun/api/data';
+  const socket = new WebSocket(url);
+  pumpPortalSocket = socket;
+
+  socket.on('open', () => {
+    console.log(`Connected to PumpPortal stream for ${contracts.length} tracked CA(s).`);
+    socket.send(JSON.stringify({
+      method: 'subscribeTokenTrade',
+      keys: contracts
+    }));
+  });
+
+  socket.on('message', async (data) => {
+    try {
+      const event = JSON.parse(data.toString());
+      await processPumpPortalTrade(event);
+    } catch (error) {
+      console.error('Could not process PumpPortal message:', error.message);
+    }
+  });
+
+  socket.on('close', () => {
+    console.warn('PumpPortal stream disconnected. Reconnecting soon.');
+    if (pumpPortalSocket === socket) {
+      pumpPortalSocket = null;
+      restartPumpPortalStreamSoon();
+    }
+  });
+
+  socket.on('error', (error) => {
+    console.error('PumpPortal websocket error:', error.message);
+  });
+}
+
+async function processPumpPortalTrade(event) {
+  if (!event?.mint || String(event.txType ?? '').toLowerCase() !== 'buy') return;
+
+  const coin = await getCoinByContract(event.mint);
+  if (!coin?.enabled) return;
+
+  await postBuyAlert({
+    coin,
+    eventInput: {
+      contract: event.mint,
+      buyer: event.traderPublicKey,
+      tokenAmount: Number(event.tokenAmount ?? event.tokensBought ?? 0),
+      usdValue: 0,
+      quoteAmount: Number(event.solAmount ?? event.solSpent ?? 0) || undefined,
+      quoteSymbol: 'SOL',
+      marketCap: event.marketCapUsd,
+      dex: event.pool ? `PumpPortal ${event.pool}` : 'PumpPortal',
+      txSignature: event.signature,
+      txUrl: event.signature ? `https://solscan.io/tx/${event.signature}` : undefined
+    }
+  });
+}
+
+function restartPumpPortalStreamSoon() {
+  if (String(ENABLE_PUMPPORTAL_STREAM).toLowerCase() !== 'true') return;
+
+  clearTimeout(pumpPortalRestartTimer);
+  pumpPortalRestartTimer = setTimeout(() => {
+    startPumpPortalStream().catch((error) => {
+      console.error('PumpPortal stream restart failed:', error.message);
+    });
+  }, 3000);
+}
+
 app.get('/api/helius/last', async (_req, res) => {
   try {
     const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
@@ -815,6 +903,12 @@ async function main() {
   if (String(ENABLE_BITQUERY_STREAM).toLowerCase() === 'true') {
     startBitqueryStream().catch((error) => {
       console.error('Bitquery stream failed to start:', error.message);
+    });
+  }
+
+  if (String(ENABLE_PUMPPORTAL_STREAM).toLowerCase() === 'true') {
+    startPumpPortalStream().catch((error) => {
+      console.error('PumpPortal stream failed to start:', error.message);
     });
   }
 }
@@ -926,6 +1020,7 @@ async function setCoinForChat(ctx, args) {
   });
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
   restartBitqueryStreamSoon();
+  restartPumpPortalStreamSoon();
 
   await ctx.reply([
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
@@ -1216,7 +1311,11 @@ async function getPumpFunMetadata(contract) {
       symbol: coin.symbol,
       imageUrl: coin.image_uri || coin.image || coin.metadata?.image,
       complete,
-      bondingProgress
+      bondingProgress,
+      marketCapUsd: coin.usd_market_cap ?? coin.market_cap,
+      twitter: coin.twitter,
+      telegram: coin.telegram,
+      website: coin.website
     };
   } catch (error) {
     console.error(`Could not fetch Pump.fun metadata for ${contract}:`, error.message);

@@ -8,28 +8,40 @@ const number = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 4
 });
 
+const compact = new Intl.NumberFormat('en-US', {
+  notation: 'compact',
+  maximumFractionDigits: 2
+});
+
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
-  const tag = coin.emoji || '[BUY]';
+  const tokenName = tokenMeta?.name || coin.name || coin.symbol;
   const buyer = event.buyer ? shortWallet(event.buyer) : 'Fresh buyer';
-  const tokens = number.format(Number(event.tokenAmount ?? 0));
-  const usdValue = money.format(Number(event.usdValue ?? 0));
-  const quoteAmount = event.quoteAmount ? `${number.format(Number(event.quoteAmount))} ${event.quoteSymbol ?? ''}`.trim() : null;
-  const txLine = event.txUrl ? `<a href="${escapeHtml(event.txUrl)}">View transaction</a>` : '';
-  const buyLine = coin.buyUrl ? `<a href="${escapeHtml(coin.buyUrl)}">Buy $${escapeHtml(coin.symbol)}</a>` : '';
+  const tokenAmount = Number(event.tokenAmount ?? 0);
+  const tokens = number.format(tokenAmount);
+  const usdValue = Number(event.usdValue ?? 0);
+  const quoteAmount = event.quoteAmount ? `${number.format(Number(event.quoteAmount))} ${event.quoteSymbol ?? 'SOL'}` : null;
+  const position = event.buyerSolBalance != null ? `${formatSigned(Number(event.buyerSolBalance))}%` : null;
+  const marketCap = event.marketCap ? money.format(Number(event.marketCap)) : tokenMeta?.marketCapUsd ? money.format(Number(tokenMeta.marketCapUsd)) : null;
+  const txLine = event.txUrl ? `<a href="${escapeHtml(event.txUrl)}">Chart</a>` : null;
+  const buyLine = coin.buyUrl ? `<a href="${escapeHtml(coin.buyUrl)}">Buy</a>` : null;
+  const socialsLine = renderSocials(coin, tokenMeta);
 
   return [
-    `${escapeHtml(tag)} <b>$${escapeHtml(coin.symbol)} Buy!</b>`,
+    `<b>NEW | ${escapeHtml(tokenName)} BUY!</b>`,
+    `by @MajorBuyBot`,
     '',
-    quoteAmount ? `Spent: <b>${escapeHtml(quoteAmount)}</b>` : null,
-    `Received: <b>${escapeHtml(tokens)} $${escapeHtml(coin.symbol)}</b>`,
-    `USD value: <b>${escapeHtml(usdValue)}</b>`,
-    `Buyer: <b>${escapeHtml(buyer)}</b>`,
-    event.buyerSolBalance != null ? `Buyer wallet: <b>${escapeHtml(number.format(Number(event.buyerSolBalance)))} SOL</b>` : null,
-    event.marketCap ? `Market cap: <b>${escapeHtml(money.format(Number(event.marketCap)))}</b>` : null,
-    event.dex ? `DEX: <b>${escapeHtml(event.dex)}</b>` : null,
     renderBondingCurve(tokenMeta),
     '',
-    [buyLine, txLine].filter(Boolean).join(' | '),
+    quoteAmount ? `<b>SOL</b> ${escapeHtml(quoteAmount.replace(' SOL', ''))}${usdValue > 0 ? ` (${escapeHtml(money.format(usdValue))})` : ''}` : null,
+    `<b>${escapeHtml(coin.symbol)}</b> ${escapeHtml(tokens)}${tokenAmount > 0 ? ` (${escapeHtml(formatMultiplier(tokenAmount))})` : ''}`,
+    position ? `<b>Position:</b> ${escapeHtml(position)} <i>(Wallet)</i>` : `Buyer: <b>${escapeHtml(buyer)}</b>`,
+    marketCap ? `<b>MCap:</b> ${escapeHtml(marketCap)}` : null,
+    socialsLine ? `<b>Socials:</b> ${socialsLine}` : null,
+    event.dex ? `<b>DEX:</b> ${escapeHtml(event.dex)}` : null,
+    '',
+    renderDexPaidLine(),
+    '',
+    [txLine, renderVoteLink(), buyLine].filter(Boolean).join(' | '),
     renderAdBlock({ trending, currentSymbol: coin.symbol, primaryCoin })
   ].filter(Boolean).join('\n');
 }
@@ -38,22 +50,41 @@ function renderBondingCurve(tokenMeta) {
   if (!tokenMeta || tokenMeta.complete === true || tokenMeta.bondingProgress == null) return null;
 
   const progress = Math.max(0, Math.min(100, Number(tokenMeta.bondingProgress)));
-  const filled = Math.round(progress / 10);
-  const empty = 10 - filled;
+  const totalBlocks = 20;
+  const filled = Math.round((progress / 100) * totalBlocks);
+  const empty = totalBlocks - filled;
+
   return [
-    '',
-    '<b>Pump.fun bonding</b>',
-    `[${'#'.repeat(filled)}${'-'.repeat(empty)}] ${number.format(progress)}%`
+    `<b>${number.format(progress)}% Bonding Process</b>`,
+    `<code>${'▓'.repeat(filled)}${'░'.repeat(empty)}</code>`
   ].join('\n');
 }
 
+function renderDexPaidLine() {
+  return '<b>[ DEX PAID ]</b>';
+}
+
+function renderVoteLink() {
+  return '<a href="https://t.me/MajorBuyBot">Vote</a>';
+}
+
+function renderSocials(coin, tokenMeta) {
+  const links = [];
+
+  if (coin.website) links.push(`<a href="${escapeHtml(coin.website)}">Web</a>`);
+  if (tokenMeta?.twitter) links.push(`<a href="${escapeHtml(tokenMeta.twitter)}">X</a>`);
+  if (tokenMeta?.telegram) links.push(`<a href="${escapeHtml(tokenMeta.telegram)}">Tg</a>`);
+
+  return links.join(' | ');
+}
+
 export function renderAdBlock({ trending, currentSymbol, primaryCoin }) {
-  const lines = ['', '<b>Trending bot channels by 24h volume</b>'];
+  const lines = ['', '<b>SOL LIVE TRENDING</b>'];
   const current = currentSymbol.toUpperCase();
   const primary = primaryCoin?.symbol?.toUpperCase();
 
   if (primaryCoin) {
-    const primaryLink = primaryCoin.buyUrl ? ` - <a href="${escapeHtml(primaryCoin.buyUrl)}">buy</a>` : '';
+    const primaryLink = primaryCoin.buyUrl ? ` - <a href="${escapeHtml(primaryCoin.buyUrl)}">Buy</a>` : '';
     const label = primary === current ? 'Featured now' : 'Rotating ad';
     lines.push(`${label}: $${escapeHtml(primaryCoin.symbol)}${primaryLink}`);
   }
@@ -62,14 +93,9 @@ export function renderAdBlock({ trending, currentSymbol, primaryCoin }) {
     .filter((item) => item.symbol !== primary)
     .slice(0, 4);
 
-  if (items.length === 0) {
-    lines.push('More projects using this bot will show here as buys come in.');
-    return lines.join('\n');
-  }
-
   for (const item of items) {
     const coin = item.coin;
-    const link = coin.buyUrl ? ` - <a href="${escapeHtml(coin.buyUrl)}">buy</a>` : '';
+    const link = coin.buyUrl ? ` - <a href="${escapeHtml(coin.buyUrl)}">Buy</a>` : '';
     lines.push(`$${escapeHtml(item.symbol)}: ${money.format(item.volumeUsd)} volume, ${item.buys} buys${link}`);
   }
 
@@ -103,6 +129,16 @@ export function renderTrendingList(trending, primaryCoin) {
 function shortWallet(wallet) {
   if (wallet.length <= 12) return wallet;
   return `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+}
+
+function formatMultiplier(amount) {
+  if (amount >= 1000) return `${compact.format(amount)}x`;
+  return `${number.format(amount)}x`;
+}
+
+function formatSigned(value) {
+  if (!Number.isFinite(value)) return '0';
+  return value > 0 ? `+${number.format(value)}` : number.format(value);
 }
 
 function escapeHtml(value) {
