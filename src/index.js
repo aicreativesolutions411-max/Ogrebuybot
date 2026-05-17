@@ -27,7 +27,7 @@ const {
 if (!BOT_TOKEN) {
   throw new Error('BOT_TOKEN is required. Copy .env.example to .env and add your Telegram bot token.');
 }
-app.get('/health'(req,res)<(res.status(200).send ok
+app.get('/health'(req,res)<(res.status(200).send "ok"
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
