@@ -8,7 +8,7 @@ const number = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 4
 });
 
-export function renderBuyAlert({ coin, event, trending, primaryCoin }) {
+export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tag = coin.emoji || '[BUY]';
   const buyer = event.buyer ? shortWallet(event.buyer) : 'Fresh buyer';
   const tokens = number.format(Number(event.tokenAmount ?? 0));
@@ -27,10 +27,24 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin }) {
     event.buyerSolBalance != null ? `Buyer wallet: <b>${escapeHtml(number.format(Number(event.buyerSolBalance)))} SOL</b>` : null,
     event.marketCap ? `Market cap: <b>${escapeHtml(money.format(Number(event.marketCap)))}</b>` : null,
     event.dex ? `DEX: <b>${escapeHtml(event.dex)}</b>` : null,
+    renderBondingCurve(tokenMeta),
     '',
     [buyLine, txLine].filter(Boolean).join(' | '),
     renderAdBlock({ trending, currentSymbol: coin.symbol, primaryCoin })
   ].filter(Boolean).join('\n');
+}
+
+function renderBondingCurve(tokenMeta) {
+  if (!tokenMeta || tokenMeta.complete === true || tokenMeta.bondingProgress == null) return null;
+
+  const progress = Math.max(0, Math.min(100, Number(tokenMeta.bondingProgress)));
+  const filled = Math.round(progress / 10);
+  const empty = 10 - filled;
+  return [
+    '',
+    '<b>Pump.fun bonding</b>',
+    `[${'#'.repeat(filled)}${'-'.repeat(empty)}] ${number.format(progress)}%`
+  ].join('\n');
 }
 
 export function renderAdBlock({ trending, currentSymbol, primaryCoin }) {

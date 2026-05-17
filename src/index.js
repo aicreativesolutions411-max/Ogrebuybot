@@ -408,13 +408,43 @@ app.post('/api/helius', async (req, res) => {
   }
 
   await saveLastHeliusPayload(req.body);
+  const result = await processHeliusPayload(req.body);
 
-  const transactions = Array.isArray(req.body) ? req.body : [req.body];
+  res.json(result);
+});
+
+app.get('/api/helius/replay-last', async (req, res) => {
+  if (WEBHOOK_SECRET && req.query.secret !== WEBHOOK_SECRET) {
+    res.status(401).json({ error: 'Invalid secret' });
+    return;
+  }
+
+  try {
+    const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
+    const debugPayload = JSON.parse(raw);
+    const result = await processHeliusPayload(debugPayload.payload);
+    res.json({ ...result, replayed: true });
+  } catch (error) {
+    res.status(404).json({ error: 'No saved Helius payload to replay.', detail: error.message });
+  }
+});
+
+async function processHeliusPayload(payload) {
+  const transactions = Array.isArray(payload) ? payload : [payload];
   const accepted = [];
   const ignored = [];
 
   for (const transaction of transactions) {
     const events = await parseHeliusTransaction(transaction);
+
+    if (events.length === 0) {
+      ignored.push({
+        reason: 'no-buy-events-parsed',
+        signature: transaction.signature,
+        type: transaction.type,
+        source: transaction.source
+      });
+    }
 
     for (const eventInput of events) {
       const coin = await getCoinByContract(eventInput.contract);
@@ -433,8 +463,8 @@ app.post('/api/helius', async (req, res) => {
     }
   }
 
-  res.json({ ok: true, accepted, ignored });
-});
+  return { ok: true, accepted, ignored };
+}
 
 app.get('/api/helius/last', async (_req, res) => {
   try {
@@ -661,14 +691,12 @@ async function postBuyAlert({ coin, eventInput }) {
 
   const trending = await getTrendingCoins(Number(TRENDING_LIMIT));
   const primaryCoin = await getPrimaryCoin();
-  const message = renderBuyAlert({ coin, event, trending, primaryCoin });
+  const tokenMeta = await getTokenMetadata(coin.contract);
+  const message = renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta });
   const channels = getAlertChannels(coin);
 
   const results = await Promise.allSettled(
-    channels.map((chatId) => bot.telegram.sendMessage(chatId, message, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
-    }))
+    channels.map((chatId) => sendBuyAlertToChat(chatId, message, tokenMeta?.imageUrl))
   );
 
   results.forEach((result, index) => {
@@ -678,6 +706,24 @@ async function postBuyAlert({ coin, eventInput }) {
   });
 
   return { event, results };
+}
+
+async function sendBuyAlertToChat(chatId, message, imageUrl) {
+  if (imageUrl) {
+    try {
+      return await bot.telegram.sendPhoto(chatId, imageUrl, {
+        caption: message,
+        parse_mode: 'HTML'
+      });
+    } catch (error) {
+      console.error(`Failed to send token image to ${chatId}, falling back to text:`, error.message);
+    }
+  }
+
+  return bot.telegram.sendMessage(chatId, message, {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  });
 }
 
 function getAlertChannels(coin) {
@@ -696,7 +742,8 @@ function getAlertChannels(coin) {
 async function parseHeliusTransaction(transaction) {
   const tokenTransfers = [
     ...(transaction.tokenTransfers ?? []),
-    ...getSwapTokenOutputs(transaction)
+    ...getSwapTokenOutputs(transaction),
+    ...getTokenBalanceChangeOutputs(transaction)
   ];
   const nativeTransfers = transaction.nativeTransfers ?? [];
   const signature = transaction.signature;
@@ -707,11 +754,11 @@ async function parseHeliusTransaction(transaction) {
     const contract = transfer.mint;
     if (!contract) continue;
 
-    const buyer = transfer.toUserAccount;
+    const buyer = transfer.toUserAccount ?? transfer.userAccount ?? transaction.feePayer;
     if (!buyer) continue;
 
     const solSpent = getSolSpentByWallet(transaction, nativeTransfers, buyer);
-    if (solSpent <= 0) continue;
+    if (solSpent <= 0 && !isLikelySwapBuy(transaction)) continue;
 
     const buyerSolBalance = await getSolBalance(buyer);
     const priceUsd = await getTokenPriceUsd(contract);
@@ -723,7 +770,7 @@ async function parseHeliusTransaction(transaction) {
       buyer,
       tokenAmount,
       usdValue: priceUsd ? tokenAmount * priceUsd : 0,
-      quoteAmount: solSpent || undefined,
+      quoteAmount: solSpent > 0 ? solSpent : undefined,
       quoteSymbol: 'SOL',
       buyerSolBalance,
       dex: source,
@@ -743,6 +790,43 @@ function getSwapTokenOutputs(transaction) {
     toUserAccount: output.userAccount ?? output.toUserAccount ?? output.account,
     tokenAmount: output.tokenAmount ?? parseRawTokenAmount(output.rawTokenAmount)
   }));
+}
+
+function getTokenBalanceChangeOutputs(transaction) {
+  return (transaction.accountData ?? []).flatMap((account) => {
+    return (account.tokenBalanceChanges ?? [])
+      .map((change) => {
+        const tokenAmount = getTokenAmountFromBalanceChange(change);
+        return {
+          mint: change.mint,
+          toUserAccount: change.userAccount ?? account.account,
+          tokenAmount
+        };
+      })
+      .filter((change) => change.mint && Number(change.tokenAmount ?? 0) > 0);
+  });
+}
+
+function getTokenAmountFromBalanceChange(change) {
+  const raw = change.rawTokenAmount;
+  if (raw) {
+    const amount = Number(raw.tokenAmount ?? raw.amount);
+    const decimals = Number(raw.decimals ?? 0);
+    if (Number.isFinite(amount)) return amount / 10 ** decimals;
+  }
+
+  return Number(change.tokenAmount ?? change.uiTokenAmount ?? 0);
+}
+
+function isLikelySwapBuy(transaction) {
+  const type = String(transaction.type ?? '').toUpperCase();
+  const source = String(transaction.source ?? '').toUpperCase();
+  return type === 'SWAP'
+    || Boolean(transaction.events?.swap)
+    || source.includes('PUMP')
+    || source.includes('RAYDIUM')
+    || source.includes('JUPITER')
+    || source.includes('METEORA');
 }
 
 function parseRawTokenAmount(rawTokenAmount) {
@@ -794,6 +878,92 @@ async function getTokenPriceUsd(contract) {
   } catch (error) {
     console.error(`Could not fetch USD price for ${contract}:`, error.message);
     return undefined;
+  }
+}
+
+async function getTokenMetadata(contract) {
+  if (!contract) return null;
+
+  const pumpMeta = await getPumpFunMetadata(contract);
+  if (pumpMeta?.imageUrl || pumpMeta?.bondingProgress != null) {
+    return pumpMeta;
+  }
+
+  const heliusMeta = await getHeliusAssetMetadata(contract);
+  return heliusMeta ?? pumpMeta;
+}
+
+async function getPumpFunMetadata(contract) {
+  try {
+    const response = await fetch(`https://frontend-api-v3.pump.fun/coins/${contract}`);
+    if (!response.ok) return null;
+
+    const coin = await response.json();
+    const complete = Boolean(coin.complete);
+    const bondingProgress = getPumpFunBondingProgress(coin);
+
+    return {
+      source: 'pump.fun',
+      name: coin.name,
+      symbol: coin.symbol,
+      imageUrl: coin.image_uri || coin.image || coin.metadata?.image,
+      complete,
+      bondingProgress
+    };
+  } catch (error) {
+    console.error(`Could not fetch Pump.fun metadata for ${contract}:`, error.message);
+    return null;
+  }
+}
+
+function getPumpFunBondingProgress(coin) {
+  const directProgress = Number(
+    coin.bonding_curve_progress
+      ?? coin.bondingCurveProgress
+      ?? coin.graduationPercent
+      ?? coin.progress
+  );
+
+  if (Number.isFinite(directProgress)) {
+    return directProgress <= 1 ? directProgress * 100 : directProgress;
+  }
+
+  const usdMarketCap = Number(coin.usd_market_cap ?? coin.market_cap);
+  const graduationMarketCap = Number(coin.king_of_the_hill_market_cap ?? coin.raydium_migration_market_cap ?? 69000);
+
+  if (Number.isFinite(usdMarketCap) && Number.isFinite(graduationMarketCap) && graduationMarketCap > 0) {
+    return Math.min(100, (usdMarketCap / graduationMarketCap) * 100);
+  }
+
+  return null;
+}
+
+async function getHeliusAssetMetadata(contract) {
+  if (!HELIUS_API_KEY) return null;
+
+  try {
+    const response = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'get-asset',
+        method: 'getAsset',
+        params: { id: contract }
+      })
+    });
+    const body = await response.json();
+    const asset = body.result;
+
+    return {
+      source: 'helius',
+      name: asset?.content?.metadata?.name,
+      symbol: asset?.content?.metadata?.symbol,
+      imageUrl: asset?.content?.links?.image
+    };
+  } catch (error) {
+    console.error(`Could not fetch Helius asset metadata for ${contract}:`, error.message);
+    return null;
   }
 }
 
