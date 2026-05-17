@@ -42,8 +42,8 @@ const app = express();
 const telegramWebhookPath = `/telegram/${BOT_TOKEN}`;
 const telegramWebhookUrl = TELEGRAM_WEBHOOK_URL ?? (BASE_URL ? `${BASE_URL.replace(/\/$/, '')}${telegramWebhookPath}` : null);
 
-app.use(express.json({ limit: '1mb' }));
 app.use(telegramWebhookPath, bot.webhookCallback(telegramWebhookPath));
+app.use(express.json({ limit: '1mb' }));
 
 const buyEventSchema = z.object({
   symbol: z.string().min(1).optional(),
@@ -223,6 +223,9 @@ bot.command('addcoin', async (ctx) => {
     renderHeliusSyncStatus(heliusResult)
   ].filter(Boolean).join('\n'));
 });
+
+bot.on('channel_post', handleFallbackCommand);
+bot.on('text', handleFallbackCommand);
 
 app.get('/', (_req, res) => {
   res.send('OGRE buy bot is running.');
@@ -467,6 +470,120 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 function getUpdateText(ctx) {
   return ctx.message?.text ?? ctx.channelPost?.text ?? '';
+}
+
+async function handleFallbackCommand(ctx) {
+  const text = getUpdateText(ctx).trim();
+  if (!text.startsWith('/')) return;
+
+  const [rawCommand, ...args] = text.split(/\s+/);
+  const command = rawCommand.slice(1).split('@')[0].toLowerCase();
+
+  if (command === 'help' || command === 'start') {
+    await showHelp(ctx);
+    return;
+  }
+
+  if (command === 'chatid') {
+    await ctx.reply(`This chat id is: ${ctx.chat.id}`);
+    return;
+  }
+
+  if (command === 'chats') {
+    await replyWithTrackedChats(ctx);
+    return;
+  }
+
+  if (command === 'setcoin' || command === 'setca') {
+    await setCoinForChat(ctx, args);
+    return;
+  }
+
+  if (command === 'track') {
+    await trackSymbolForChat(ctx, args[0]);
+    return;
+  }
+
+  if (command === 'testbuy') {
+    await sendTestBuy(ctx, args[0] ?? 'OGRE');
+  }
+}
+
+async function replyWithTrackedChats(ctx) {
+  const chats = await getTrackedChats();
+  if (chats.length === 0) {
+    await ctx.reply('No chats are tracking coins yet.');
+    return;
+  }
+
+  await ctx.reply(chats.map((item) => `${item.chatId} -> $${item.symbol} (${item.contract})`).join('\n'));
+}
+
+async function setCoinForChat(ctx, args) {
+  const [symbol, contract, buyUrlArg] = args;
+
+  if (!symbol || !contract) {
+    await ctx.reply('Usage: /setcoin SYMBOL CONTRACT');
+    return;
+  }
+
+  const buyUrl = buyUrlArg || `https://pump.fun/coin/${contract}`;
+  const coin = await addChannelToCoinByContract(contract, ctx.chat.id, {
+    symbol,
+    name: symbol.toUpperCase(),
+    buyUrl,
+    website: buyUrl
+  });
+  const heliusResult = await ensureHeliusTracksContract(coin.contract);
+
+  await ctx.reply([
+    `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
+    renderHeliusSyncStatus(heliusResult)
+  ].filter(Boolean).join('\n'));
+}
+
+async function trackSymbolForChat(ctx, symbol) {
+  if (!symbol) {
+    await ctx.reply('Usage: /track OGRE');
+    return;
+  }
+
+  try {
+    const coin = await addChannelToCoin(symbol, ctx.chat.id);
+    const heliusResult = await ensureHeliusTracksContract(coin.contract);
+    await ctx.reply([
+      `This chat is now tracking $${coin.symbol}. Make sure the bot is admin if this is a channel.`,
+      renderHeliusSyncStatus(heliusResult)
+    ].filter(Boolean).join('\n'));
+  } catch (error) {
+    await ctx.reply(error.message);
+  }
+}
+
+async function sendTestBuy(ctx, symbol) {
+  const coin = await getCoin(symbol);
+
+  if (!coin?.enabled) {
+    await ctx.reply(`Unknown coin: ${symbol}`);
+    return;
+  }
+
+  await postBuyAlert({
+    coin,
+    eventInput: {
+      symbol: coin.symbol,
+      contract: coin.contract,
+      buyer: 'TESTBUY1111111111111111111111111111111111',
+      tokenAmount: 100000,
+      usdValue: 123.45,
+      quoteAmount: 1,
+      quoteSymbol: DEFAULT_QUOTE_SYMBOL,
+      dex: 'test',
+      txUrl: coin.website
+    }
+  });
+
+  await ctx.reply(`Sent a test buy alert for $${coin.symbol}.`);
 }
 
 async function postBuyAlert({ coin, eventInput }) {
