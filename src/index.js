@@ -41,8 +41,9 @@ const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 const telegramWebhookPath = `/telegram/${BOT_TOKEN}`;
 const telegramWebhookUrl = TELEGRAM_WEBHOOK_URL ?? (BASE_URL ? `${BASE_URL.replace(/\/$/, '')}${telegramWebhookPath}` : null);
+let botUsername = '';
 
-app.use(telegramWebhookPath, bot.webhookCallback(telegramWebhookPath));
+app.use(bot.webhookCallback(telegramWebhookPath));
 app.use(express.json({ limit: '1mb' }));
 
 const buyEventSchema = z.object({
@@ -225,7 +226,7 @@ bot.command('addcoin', async (ctx) => {
 });
 
 bot.on('channel_post', handleFallbackCommand);
-bot.on('text', handleFallbackCommand);
+bot.on('message', handleFallbackCommand);
 
 app.get('/', (_req, res) => {
   res.send('OGRE buy bot is running.');
@@ -245,6 +246,39 @@ app.get('/api/debug/coins', async (_req, res) => {
       enabled: coin.enabled,
       channels: coin.channels ?? []
     }))
+  });
+});
+
+app.get('/api/telegram/info', async (_req, res) => {
+  const webhookInfo = await bot.telegram.getWebhookInfo();
+  res.json({
+    ok: true,
+    botUsername,
+    webhookInfo
+  });
+});
+
+app.get('/api/telegram/reset-webhook', async (req, res) => {
+  if (WEBHOOK_SECRET && req.query.secret !== WEBHOOK_SECRET) {
+    res.status(401).json({ error: 'Invalid secret' });
+    return;
+  }
+
+  if (!telegramWebhookUrl) {
+    res.status(400).json({ error: 'BASE_URL or TELEGRAM_WEBHOOK_URL is required to set Telegram webhook.' });
+    return;
+  }
+
+  await bot.telegram.setWebhook(telegramWebhookUrl, {
+    drop_pending_updates: true,
+    allowed_updates: ['message', 'channel_post', 'my_chat_member']
+  });
+  const webhookInfo = await bot.telegram.getWebhookInfo();
+
+  res.json({
+    ok: true,
+    telegramWebhookUrl,
+    webhookInfo
   });
 });
 
@@ -421,6 +455,7 @@ async function main() {
   });
 
   const me = await bot.telegram.getMe();
+  botUsername = me.username;
   console.log(`Telegram bot connected as @${me.username}`);
 
   await bot.telegram.setMyCommands([
@@ -440,7 +475,8 @@ async function main() {
 
   if (telegramWebhookUrl) {
     await bot.telegram.setWebhook(telegramWebhookUrl, {
-      drop_pending_updates: true
+      drop_pending_updates: true,
+      allowed_updates: ['message', 'channel_post', 'my_chat_member']
     });
     console.log(`Telegram webhook set to ${telegramWebhookUrl}`);
   } else {
@@ -469,15 +505,18 @@ process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 function getUpdateText(ctx) {
-  return ctx.message?.text ?? ctx.channelPost?.text ?? '';
+  return ctx.message?.text
+    ?? ctx.message?.caption
+    ?? ctx.channelPost?.text
+    ?? ctx.channelPost?.caption
+    ?? '';
 }
 
 async function handleFallbackCommand(ctx) {
-  const text = getUpdateText(ctx).trim();
-  if (!text.startsWith('/')) return;
+  const parsed = parseCommandFromText(getUpdateText(ctx));
+  if (!parsed) return;
 
-  const [rawCommand, ...args] = text.split(/\s+/);
-  const command = rawCommand.slice(1).split('@')[0].toLowerCase();
+  const { command, args } = parsed;
 
   if (command === 'help' || command === 'start') {
     await showHelp(ctx);
@@ -507,6 +546,28 @@ async function handleFallbackCommand(ctx) {
   if (command === 'testbuy') {
     await sendTestBuy(ctx, args[0] ?? 'OGRE');
   }
+}
+
+function parseCommandFromText(rawText) {
+  let text = rawText.trim();
+  if (!text) return null;
+
+  const mentionPattern = botUsername ? new RegExp(`^@${escapeRegExp(botUsername)}\\b\\s*`, 'i') : /^@\w+\b\s*/i;
+  text = text.replace(mentionPattern, '').trim();
+
+  if (!text.startsWith('/')) {
+    const firstWord = text.split(/\s+/)[0]?.toLowerCase();
+    const mentionOnlyCommands = new Set(['help', 'start', 'chatid', 'chats', 'setcoin', 'setca', 'track', 'testbuy']);
+    if (!mentionOnlyCommands.has(firstWord)) return null;
+  }
+
+  const [rawCommand, ...args] = text.split(/\s+/);
+  const command = rawCommand.replace(/^\//, '').split('@')[0].toLowerCase();
+  return { command, args };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function replyWithTrackedChats(ctx) {
