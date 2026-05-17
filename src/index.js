@@ -6,9 +6,11 @@ import { Telegraf } from 'telegraf';
 import { z } from 'zod';
 import {
   addChannelToCoin,
+  addChannelToCoinByContract,
   getCoin,
   getCoinByContract,
   getPrimaryCoin,
+  getTrackedChats,
   getTrendingCoins,
   readStore,
   recordBuyEvent,
@@ -21,8 +23,11 @@ const {
   PORT = 3000,
   WEBHOOK_SECRET,
   HELIUS_AUTH_HEADER,
+  HELIUS_API_KEY,
+  HELIUS_WEBHOOK_ID,
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
+  ALERT_CHAT_ID,
   SOLANA_RPC_HTTP = 'https://api.mainnet-beta.solana.com',
   DEFAULT_QUOTE_SYMBOL = 'SOL',
   TRENDING_LIMIT = 5
@@ -67,7 +72,9 @@ async function showHelp(ctx) {
     '/coins - list tracked coins',
     '/trending - show 24h trending volume',
     '/chatid - show this Telegram chat id',
+    '/chats - show tracked chats',
     '/track OGRE - add this chat/channel to a coin',
+    '/setcoin SYMBOL CONTRACT - register this chat for a coin',
     '/testbuy OGRE - send a test buy alert',
     '/addcoin SYMBOL Name | chain | contract | buyUrl - register a coin',
     '',
@@ -90,6 +97,36 @@ bot.command('chatid', async (ctx) => {
   await ctx.reply(`This chat id is: ${ctx.chat.id}`);
 });
 
+bot.command('chats', async (ctx) => {
+  const chats = await getTrackedChats();
+  if (chats.length === 0) {
+    await ctx.reply('No chats are tracking coins yet.');
+    return;
+  }
+
+  await ctx.reply(chats.map((item) => `${item.chatId} -> $${item.symbol} (${item.contract})`).join('\n'));
+});
+
+bot.command('sync_helius', async (ctx) => {
+  const store = await readStore();
+  const contracts = store.coins
+    .filter((coin) => coin.enabled && coin.contract)
+    .map((coin) => coin.contract);
+
+  const heliusResult = await ensureHeliusTracksContracts(contracts);
+  await ctx.reply(renderHeliusSyncStatus(heliusResult) || 'Helius sync did not run. Check env vars.');
+});
+
+bot.on('my_chat_member', async (ctx) => {
+  const update = ctx.update.my_chat_member;
+  const chat = update.chat;
+  const status = update.new_chat_member.status;
+
+  if (['member', 'administrator'].includes(status)) {
+    console.log(`Bot was added to chat ${chat.id} (${chat.title ?? chat.username ?? chat.type}). Use /setcoin SYMBOL CONTRACT in that chat to enable buy alerts.`);
+  }
+});
+
 bot.command('track', async (ctx) => {
   const symbol = getUpdateText(ctx).split(/\s+/)[1];
   if (!symbol) {
@@ -99,10 +136,38 @@ bot.command('track', async (ctx) => {
 
   try {
     const coin = await addChannelToCoin(symbol, ctx.chat.id);
-    await ctx.reply(`This chat is now tracking $${coin.symbol}. Make sure the bot is admin if this is a channel.`);
+    const heliusResult = await ensureHeliusTracksContract(coin.contract);
+    await ctx.reply([
+      `This chat is now tracking $${coin.symbol}. Make sure the bot is admin if this is a channel.`,
+      renderHeliusSyncStatus(heliusResult)
+    ].filter(Boolean).join('\n'));
   } catch (error) {
     await ctx.reply(error.message);
   }
+});
+
+bot.command('setcoin', async (ctx) => {
+  const text = getUpdateText(ctx);
+  const [, symbol, contract, ...rest] = text.split(/\s+/);
+
+  if (!symbol || !contract) {
+    await ctx.reply('Usage: /setcoin SYMBOL CONTRACT');
+    return;
+  }
+
+  const buyUrl = rest[0] || `https://pump.fun/coin/${contract}`;
+  const coin = await addChannelToCoinByContract(contract, ctx.chat.id, {
+    symbol,
+    name: symbol.toUpperCase(),
+    buyUrl,
+    website: buyUrl
+  });
+  const heliusResult = await ensureHeliusTracksContract(coin.contract);
+
+  await ctx.reply([
+    `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
+    renderHeliusSyncStatus(heliusResult)
+  ].filter(Boolean).join('\n'));
 });
 
 bot.command('testbuy', async (ctx) => {
@@ -150,8 +215,12 @@ bot.command('addcoin', async (ctx) => {
     buyUrl: buyUrl.trim(),
     channels: [String(ctx.chat.id)]
   });
+  const heliusResult = await ensureHeliusTracksContract(coin.contract);
 
-  await ctx.reply(`Added $${coin.symbol} and linked it to this chat.`);
+  await ctx.reply([
+    `Added $${coin.symbol} and linked it to this chat.`,
+    renderHeliusSyncStatus(heliusResult)
+  ].filter(Boolean).join('\n'));
 });
 
 app.get('/', (_req, res) => {
@@ -210,6 +279,50 @@ app.get('/api/test-alert/:symbol', async (req, res) => {
     sent: results.filter((result) => result.status === 'fulfilled').length,
     failed: results
       .map((result, index) => ({ result, chatId: coin.channels?.[index] }))
+      .filter((item) => item.result.status === 'rejected')
+      .map((item) => ({
+        chatId: item.chatId,
+        error: item.result.reason?.description ?? item.result.reason?.message ?? String(item.result.reason)
+      })),
+    event
+  });
+});
+
+app.get('/api/test-alert-contract/:contract', async (req, res) => {
+  if (WEBHOOK_SECRET && req.query.secret !== WEBHOOK_SECRET && req.header('x-bot-secret') !== WEBHOOK_SECRET) {
+    res.status(401).json({ error: 'Invalid secret' });
+    return;
+  }
+
+  const coin = await getCoinByContract(req.params.contract);
+  if (!coin?.enabled) {
+    res.status(404).json({ error: `Unknown contract: ${req.params.contract}` });
+    return;
+  }
+
+  const { event, results, duplicate } = await postBuyAlert({
+    coin,
+    eventInput: {
+      symbol: coin.symbol,
+      contract: coin.contract,
+      buyer: 'LIVECHECK111111111111111111111111111111111',
+      tokenAmount: 100000,
+      usdValue: 123.45,
+      quoteAmount: 1,
+      quoteSymbol: DEFAULT_QUOTE_SYMBOL,
+      buyerSolBalance: 5.25,
+      dex: 'render-test',
+      txUrl: coin.website || coin.buyUrl
+    }
+  });
+
+  res.json({
+    ok: true,
+    duplicate: Boolean(duplicate),
+    channels: getAlertChannels(coin),
+    sent: results.filter((result) => result.status === 'fulfilled').length,
+    failed: results
+      .map((result, index) => ({ result, chatId: getAlertChannels(coin)[index] }))
       .filter((item) => item.result.status === 'rejected')
       .map((item) => ({
         chatId: item.chatId,
@@ -312,7 +425,10 @@ async function main() {
     { command: 'coins', description: 'List tracked coins' },
     { command: 'trending', description: 'Show 24h trending volume' },
     { command: 'chatid', description: 'Show this chat id' },
+    { command: 'chats', description: 'Show tracked chats' },
+    { command: 'sync_helius', description: 'Sync tracked CAs to Helius' },
     { command: 'track', description: 'Track a coin in this chat' },
+    { command: 'setcoin', description: 'Register this chat for a coin CA' },
     { command: 'testbuy', description: 'Send a test buy alert' },
     { command: 'addcoin', description: 'Register another coin' }
   ]);
@@ -366,7 +482,7 @@ async function postBuyAlert({ coin, eventInput }) {
   const trending = await getTrendingCoins(Number(TRENDING_LIMIT));
   const primaryCoin = await getPrimaryCoin();
   const message = renderBuyAlert({ coin, event, trending, primaryCoin });
-  const channels = coin.channels ?? [];
+  const channels = getAlertChannels(coin);
 
   const results = await Promise.allSettled(
     channels.map((chatId) => bot.telegram.sendMessage(chatId, message, {
@@ -382,6 +498,15 @@ async function postBuyAlert({ coin, eventInput }) {
   });
 
   return { event, results };
+}
+
+function getAlertChannels(coin) {
+  const configuredChannels = coin.channels ?? [];
+  const envChannels = ALERT_CHAT_ID
+    ? ALERT_CHAT_ID.split(',').map((chatId) => chatId.trim()).filter(Boolean)
+    : [];
+
+  return Array.from(new Set([...configuredChannels, ...envChannels]));
 }
 
 async function parseHeliusTransaction(transaction) {
@@ -507,6 +632,103 @@ async function getSolBalance(wallet) {
     console.error(`Could not fetch SOL balance for ${wallet}:`, error.message);
     return undefined;
   }
+}
+
+async function ensureHeliusTracksContract(contract) {
+  if (!contract) {
+    return { ok: false, skipped: true, message: 'No contract provided.' };
+  }
+
+  return ensureHeliusTracksContracts([contract]);
+}
+
+async function ensureHeliusTracksContracts(contracts) {
+  const uniqueContracts = Array.from(new Set(
+    contracts
+      .map((contract) => String(contract ?? '').trim())
+      .filter(Boolean)
+  ));
+
+  if (uniqueContracts.length === 0) {
+    return { ok: false, skipped: true, message: 'No contracts to sync.' };
+  }
+
+  if (!HELIUS_API_KEY || !HELIUS_WEBHOOK_ID) {
+    return {
+      ok: false,
+      skipped: true,
+      message: 'Helius auto-sync skipped. Set HELIUS_API_KEY and HELIUS_WEBHOOK_ID on Render.'
+    };
+  }
+
+  try {
+    const webhook = await fetchHeliusWebhook();
+    const currentAddresses = webhook.accountAddresses ?? [];
+    const nextAddresses = Array.from(new Set([...currentAddresses, ...uniqueContracts]));
+    const added = nextAddresses.length - currentAddresses.length;
+
+    if (added === 0) {
+      return { ok: true, added: 0, total: nextAddresses.length, message: 'Helius already tracks this CA.' };
+    }
+
+    await updateHeliusWebhook({
+      ...webhook,
+      accountAddresses: nextAddresses
+    });
+
+    return {
+      ok: true,
+      added,
+      total: nextAddresses.length,
+      message: `Helius synced ${added} new CA${added === 1 ? '' : 's'}.`
+    };
+  } catch (error) {
+    console.error('Helius auto-sync failed:', error);
+    return {
+      ok: false,
+      message: `Helius auto-sync failed: ${error.message}`
+    };
+  }
+}
+
+async function fetchHeliusWebhook() {
+  const response = await fetch(`https://api-mainnet.helius-rpc.com/v0/webhooks/${HELIUS_WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`);
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(body.error ?? body.message ?? `Helius GET failed with ${response.status}`);
+  }
+
+  return body;
+}
+
+async function updateHeliusWebhook(webhook) {
+  const response = await fetch(`https://api-mainnet.helius-rpc.com/v0/webhooks/${HELIUS_WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      webhookURL: webhook.webhookURL,
+      transactionTypes: webhook.transactionTypes?.length ? webhook.transactionTypes : ['ANY'],
+      accountAddresses: webhook.accountAddresses ?? [],
+      webhookType: webhook.webhookType ?? 'enhanced',
+      authHeader: webhook.authHeader,
+      encoding: webhook.encoding,
+      txnStatus: webhook.txnStatus
+    })
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(body.error ?? body.message ?? `Helius PUT failed with ${response.status}`);
+  }
+
+  return body;
+}
+
+function renderHeliusSyncStatus(result) {
+  if (!result) return '';
+  if (result.ok) return result.message;
+  return result.message ? `Warning: ${result.message}` : '';
 }
 
 function isValidHeliusAuth(authHeader) {

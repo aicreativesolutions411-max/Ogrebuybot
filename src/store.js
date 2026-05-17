@@ -33,12 +33,18 @@ export async function upsertCoin(nextCoin) {
   const store = await readStore();
   const symbol = nextCoin.symbol.toUpperCase();
   const existingIndex = store.coins.findIndex((coin) => coin.symbol.toUpperCase() === symbol);
+  const existing = existingIndex >= 0 ? store.coins[existingIndex] : {};
+  const channels = Array.from(new Set([
+    ...(existing.channels ?? []),
+    ...(nextCoin.channels ?? [])
+  ].map(String)));
   const normalized = {
     chain: 'unknown',
-    channels: [],
+    channels,
     enabled: true,
     isPrimary: false,
     ...nextCoin,
+    channels,
     symbol
   };
 
@@ -64,6 +70,44 @@ export async function addChannelToCoin(symbol, chatId) {
   coin.channels = Array.from(new Set([...(coin.channels ?? []), normalizedChatId]));
   await writeStore(store);
   return coin;
+}
+
+export async function addChannelToCoinByContract(contract, chatId, defaults = {}) {
+  const store = await readStore();
+  const normalizedContract = contract.trim();
+  let coin = store.coins.find((item) => item.contract?.toLowerCase() === normalizedContract.toLowerCase());
+
+  if (!coin) {
+    const symbol = (defaults.symbol || `COIN${store.coins.length + 1}`).toUpperCase();
+    coin = {
+      symbol,
+      name: defaults.name || symbol,
+      chain: defaults.chain || 'solana',
+      contract: normalizedContract,
+      emoji: defaults.emoji || '[BUY]',
+      website: defaults.website || '',
+      buyUrl: defaults.buyUrl || `https://pump.fun/coin/${normalizedContract}`,
+      channels: [],
+      isPrimary: false,
+      enabled: true,
+      adText: ''
+    };
+    store.coins.push(coin);
+  }
+
+  const normalizedChatId = String(chatId);
+  coin.channels = Array.from(new Set([...(coin.channels ?? []), normalizedChatId]));
+  await writeStore(store);
+  return coin;
+}
+
+export async function getTrackedChats() {
+  const store = await readStore();
+  return store.coins.flatMap((coin) => (coin.channels ?? []).map((chatId) => ({
+    chatId,
+    symbol: coin.symbol,
+    contract: coin.contract
+  })));
 }
 
 export async function recordBuyEvent(event) {
