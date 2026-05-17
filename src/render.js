@@ -17,7 +17,7 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
-const SLIME_BORDER = '━━━━━━━━━━━━━━━━━━━━';
+const SLIME_BORDER = '🟢🟩🟩🟩🟩🟩🟩🟩🟩🟢';
 
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
@@ -47,7 +47,6 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     buyer ? `Buyer: <b>${escapeHtml(buyer)}</b>` : null,
     marketCap ? `<b>MCap:</b> ${escapeHtml(marketCap)}` : null,
     socialsLine ? `<b>Socials:</b> ${socialsLine}` : null,
-    event.dex ? `<b>DEX:</b> ${escapeHtml(event.dex)}` : null,
     '',
     renderDexPaidLine(event.dex),
     '',
@@ -70,13 +69,23 @@ function renderBondingCurve(tokenMeta) {
   const status = progress >= 100 ? 'BONDED' : 'Bonding Process';
 
   return [
-    `<b>${number.format(progress)}% ${status}</b> ${'🟩'.repeat(filled)}${'⬛'.repeat(empty)}`
+    `<b>${number.format(progress)}% ${status}</b>`,
+    `${'🟩'.repeat(filled)}${'⬛'.repeat(empty)}`
   ].join('\n');
 }
 
 function renderDexPaidLine(dex) {
-  const label = dex ? `DEX PAID | ${dex}` : 'DEX PAID';
+  const cleanDex = cleanDexName(dex);
+  const label = cleanDex ? `DEX PAID | ${cleanDex}` : 'DEX PAID';
   return `<b>[ ${escapeHtml(label)} ]</b>`;
+}
+
+function cleanDexName(dex) {
+  if (!dex) return '';
+  return String(dex)
+    .replace(/\s*aggregate\s*/gi, '')
+    .replace(/pumpfun/gi, 'Pump.fun')
+    .trim();
 }
 
 function renderSocials(coin, tokenMeta) {
