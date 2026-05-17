@@ -1,3 +1,7 @@
+const OGRE_TELEGRAM = 'https://t.me/ogrecoinonsol';
+const OGRE_WEBSITE = 'https://ogremode.com/';
+const OGRE_TWITTER = 'https://twitter.com/i/communities/1930265213917425858';
+
 const money = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -27,44 +31,51 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
   const socialsLine = renderSocials(coin, tokenMeta);
 
   return [
+    '<b>..:: SLIME BUY ALERT ::..</b>',
     `<b>NEW | ${escapeHtml(tokenName)} BUY!</b>`,
-    `by @MajorBuyBot`,
+    'by @MajorBuyBot',
     '',
     renderBondingCurve(tokenMeta),
     '',
     event.aggregateBuys ? `<b>Detected:</b> ${escapeHtml(event.aggregateBuys)} DEX buy${event.aggregateBuys === 1 ? '' : 's'}` : null,
     quoteAmount ? `<b>SOL</b> ${escapeHtml(quoteAmount.replace(' SOL', ''))}${usdValue > 0 ? ` (${escapeHtml(money.format(usdValue))})` : ''}` : null,
-    tokenAmount > 0 ? `<b>${escapeHtml(coin.symbol)}</b> ${escapeHtml(tokens)} (${escapeHtml(formatMultiplier(tokenAmount))})` : null,
-    event.aggregateVolumeUsd ? `<b>DEX volume:</b> ${escapeHtml(money.format(Number(event.aggregateVolumeUsd)))}` : null,
+    tokenAmount > 0 ? `<b>${formatTicker(coin.symbol)}</b> ${escapeHtml(tokens)} (${escapeHtml(formatMultiplier(tokenAmount))})` : null,
+    event.aggregateVolumeUsd ? `<b>DEX activity:</b> ${escapeHtml(money.format(Number(event.aggregateVolumeUsd)))}` : null,
     position ? `<b>Position:</b> ${escapeHtml(position)} <i>(Wallet)</i>` : null,
     buyer ? `Buyer: <b>${escapeHtml(buyer)}</b>` : null,
     marketCap ? `<b>MCap:</b> ${escapeHtml(marketCap)}` : null,
     socialsLine ? `<b>Socials:</b> ${socialsLine}` : null,
     event.dex ? `<b>DEX:</b> ${escapeHtml(event.dex)}` : null,
     '',
-    renderDexPaidLine(),
+    renderDexPaidLine(event.dex),
     '',
     [txLine, renderVoteLink(), buyLine].filter(Boolean).join(' | '),
-    renderAdBlock({ trending, currentSymbol: coin.symbol, primaryCoin })
+    renderAdBlock({ trending, primaryCoin }),
+    renderOgreFooter()
   ].filter(Boolean).join('\n');
 }
 
 function renderBondingCurve(tokenMeta) {
-  if (!tokenMeta || tokenMeta.complete === true || tokenMeta.bondingProgress == null) return null;
+  const progress = tokenMeta?.bondingProgress == null
+    ? tokenMeta?.complete === true ? 100 : null
+    : Math.max(0, Math.min(100, Number(tokenMeta.bondingProgress)));
+  if (progress == null) return null;
 
-  const progress = Math.max(0, Math.min(100, Number(tokenMeta.bondingProgress)));
-  const totalBlocks = 20;
-  const filled = Math.round((progress / 100) * totalBlocks);
-  const empty = totalBlocks - filled;
+  const totalBlocks = 18;
+  const filled = progress >= 100 ? totalBlocks : Math.round((progress / 100) * totalBlocks);
+  const empty = Math.max(0, totalBlocks - filled);
+  const status = progress >= 100 ? 'BONDED' : 'Bonding Process';
 
   return [
-    `<b>${number.format(progress)}% Bonding Process</b>`,
-    `<code>${'▓'.repeat(filled)}${'░'.repeat(empty)}</code>`
+    `<b>${number.format(progress)}% ${status}</b>`,
+    `<code>[${'█'.repeat(filled)}${'░'.repeat(empty)}]</code>`,
+    progress >= 100 ? '<b>FULL SLIME</b>' : '<b>SLIME LOADING</b>'
   ].join('\n');
 }
 
-function renderDexPaidLine() {
-  return '<b>[ DEX PAID ]</b>';
+function renderDexPaidLine(dex) {
+  const label = dex ? `DEX PAID | ${dex}` : 'DEX PAID';
+  return `<b>[ ${escapeHtml(label)} ]</b>`;
 }
 
 function renderVoteLink() {
@@ -81,28 +92,35 @@ function renderSocials(coin, tokenMeta) {
   return links.join(' | ');
 }
 
-export function renderAdBlock({ trending, currentSymbol, primaryCoin }) {
-  const lines = ['', '<b>SOL LIVE TRENDING</b>'];
-  const current = currentSymbol.toUpperCase();
-  const primary = primaryCoin?.symbol?.toUpperCase();
+export function renderAdBlock({ trending, primaryCoin }) {
+  const lines = ['', '<b>Top Movers</b>'];
 
-  if (primaryCoin) {
-    const primaryLink = primaryCoin.buyUrl ? ` - <a href="${escapeHtml(primaryCoin.buyUrl)}">Buy</a>` : '';
-    const label = primary === current ? 'Featured now' : 'Rotating ad';
-    lines.push(`${label}: $${escapeHtml(primaryCoin.symbol)}${primaryLink}`);
-  }
+  const ogre = primaryCoin?.symbol?.toUpperCase() === 'OGRE'
+    ? primaryCoin
+    : { symbol: 'OGRE', buyUrl: 'https://pump.fun/coin/5RAZMWd9RiKfodLPQ73cFk4CMoJzTUsATUoRdDThpump' };
+  const ogreLink = ogre.buyUrl ? ` - <a href="${escapeHtml(ogre.buyUrl)}">Buy</a>` : '';
+  lines.push(`1. ${formatTicker(ogre.symbol)}${ogreLink}`);
 
   const items = trending
-    .filter((item) => item.symbol !== primary)
-    .slice(0, 4);
+    .filter((item) => item.symbol.toUpperCase() !== 'OGRE')
+    .sort((a, b) => Number(b.volumeUsd ?? 0) - Number(a.volumeUsd ?? 0))
+    .slice(0, 3);
 
-  for (const item of items) {
+  items.forEach((item, index) => {
     const coin = item.coin;
     const link = coin.buyUrl ? ` - <a href="${escapeHtml(coin.buyUrl)}">Buy</a>` : '';
-    lines.push(`$${escapeHtml(item.symbol)}: ${money.format(item.volumeUsd)} volume, ${item.buys} buys${link}`);
-  }
+    lines.push(`${index + 2}. ${formatTicker(item.symbol)}${link}`);
+  });
 
   return lines.join('\n');
+}
+
+function renderOgreFooter() {
+  return [
+    '',
+    '<b>powered by ogres</b>',
+    `<a href="${OGRE_TELEGRAM}">Telegram</a> | <a href="${OGRE_WEBSITE}">Website</a> | <a href="${OGRE_TWITTER}">Twitter</a>`
+  ].join('\n');
 }
 
 export function renderCoinList(coins) {
@@ -111,27 +129,31 @@ export function renderCoinList(coins) {
   return coins.map((coin) => {
     const primary = coin.isPrimary ? ' *' : '';
     const channels = (coin.channels ?? []).length;
-    return `$${coin.symbol}${primary} - ${coin.name} (${channels} channel${channels === 1 ? '' : 's'})`;
+    return `${formatTicker(coin.symbol)}${primary} - ${coin.name} (${channels} channel${channels === 1 ? '' : 's'})`;
   }).join('\n');
 }
 
 export function renderTrendingList(trending, primaryCoin) {
   if (trending.length === 0) {
     return primaryCoin
-      ? `No buy volume yet. $${primaryCoin.symbol} will still rotate as the featured ad.`
+      ? `No buy volume yet. ${formatTicker(primaryCoin.symbol)} will still rotate as the featured mover.`
       : 'No buy volume yet.';
   }
 
   return [
     'Top bot coins by 24h volume:',
     '',
-    ...trending.map((item, index) => `${index + 1}. $${item.symbol} - ${money.format(item.volumeUsd)} volume, ${item.buys} buys`)
+    ...trending.map((item, index) => `${index + 1}. ${formatTicker(item.symbol)} - ${money.format(item.volumeUsd)} volume, ${item.buys} buys`)
   ].join('\n');
 }
 
 function shortWallet(wallet) {
   if (wallet.length <= 12) return wallet;
   return `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+}
+
+function formatTicker(symbol) {
+  return `$${String(symbol).replace(/^\$+/, '').toUpperCase()}`;
 }
 
 function formatMultiplier(amount) {
