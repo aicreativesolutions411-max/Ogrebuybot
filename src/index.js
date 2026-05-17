@@ -13,7 +13,7 @@ import {
   upsertCoin
 } from './store.js';
 import { renderBuyAlert, renderCoinList, renderTrendingList } from './render.js';
-
+const app = 'express'
 const {
   BOT_TOKEN,
   PORT = 3000,
@@ -27,7 +27,7 @@ const {
 if (!BOT_TOKEN) {
   throw new Error('BOT_TOKEN is required. Copy .env.example to .env and add your Telegram bot token.');
 }
-
+app.get('/health'(req,res'<(res.status(200).send ok
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
