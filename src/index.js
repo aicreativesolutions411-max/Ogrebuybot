@@ -75,6 +75,7 @@ async function showHelp(ctx) {
     '/chats - show tracked chats',
     '/track OGRE - add this chat/channel to a coin',
     '/setcoin SYMBOL CONTRACT - register this chat for a coin',
+    '/setca SYMBOL CONTRACT - same as /setcoin',
     '/testbuy OGRE - send a test buy alert',
     '/addcoin SYMBOL Name | chain | contract | buyUrl - register a coin',
     '',
@@ -146,7 +147,7 @@ bot.command('track', async (ctx) => {
   }
 });
 
-bot.command('setcoin', async (ctx) => {
+bot.command(['setcoin', 'setca'], async (ctx) => {
   const text = getUpdateText(ctx);
   const [, symbol, contract, ...rest] = text.split(/\s+/);
 
@@ -429,6 +430,7 @@ async function main() {
     { command: 'sync_helius', description: 'Sync tracked CAs to Helius' },
     { command: 'track', description: 'Track a coin in this chat' },
     { command: 'setcoin', description: 'Register this chat for a coin CA' },
+    { command: 'setca', description: 'Register this chat for a coin CA' },
     { command: 'testbuy', description: 'Send a test buy alert' },
     { command: 'addcoin', description: 'Register another coin' }
   ]);
@@ -502,11 +504,15 @@ async function postBuyAlert({ coin, eventInput }) {
 
 function getAlertChannels(coin) {
   const configuredChannels = coin.channels ?? [];
-  const envChannels = ALERT_CHAT_ID
+  const fallbackChannels = ALERT_CHAT_ID
     ? ALERT_CHAT_ID.split(',').map((chatId) => chatId.trim()).filter(Boolean)
     : [];
 
-  return Array.from(new Set([...configuredChannels, ...envChannels]));
+  if (configuredChannels.length > 0) {
+    return Array.from(new Set(configuredChannels));
+  }
+
+  return Array.from(new Set(fallbackChannels));
 }
 
 async function parseHeliusTransaction(transaction) {
