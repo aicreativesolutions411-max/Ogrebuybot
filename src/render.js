@@ -17,6 +17,8 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
+const GREEN_BORDER = '🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩';
+
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
   const buyer = event.buyer && event.buyer !== 'DEXSCREENER_AGGREGATE' ? shortWallet(event.buyer) : null;
@@ -31,6 +33,7 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
   const socialsLine = renderSocials(coin, tokenMeta);
 
   return [
+    GREEN_BORDER,
     '<b>..:: SLIME BUY ALERT ::..</b>',
     `<b>NEW | ${escapeHtml(tokenName)} BUY!</b>`,
     'by @MajorBuyBot',
@@ -51,7 +54,8 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     '',
     [txLine, renderVoteLink(), buyLine].filter(Boolean).join(' | '),
     renderAdBlock({ trending, primaryCoin }),
-    renderOgreFooter()
+    renderOgreFooter(),
+    GREEN_BORDER
   ].filter(Boolean).join('\n');
 }
 
@@ -68,7 +72,7 @@ function renderBondingCurve(tokenMeta) {
 
   return [
     `<b>${number.format(progress)}% ${status}</b>`,
-    `<code>[${'█'.repeat(filled)}${'░'.repeat(empty)}]</code>`,
+    `${'🟩'.repeat(filled)}${'⬛'.repeat(empty)}`,
     progress >= 100 ? '<b>FULL SLIME</b>' : '<b>SLIME LOADING</b>'
   ].join('\n');
 }
