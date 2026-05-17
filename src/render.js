@@ -17,7 +17,7 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
-const SLIME_BORDER = '🟢🟩🟩🟩🟩🟩🟩🟩🟩🟢';
+const SLIME_BORDER = '🟢🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟢';
 
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
@@ -37,12 +37,10 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     `<b>NEW | ${escapeHtml(tokenName)} BUY!</b>`,
     'by @OgreBuyBot',
     '',
-    renderBondingCurve(tokenMeta),
-    '',
-    event.aggregateBuys ? `<b>Detected:</b> ${escapeHtml(event.aggregateBuys)} DEX buy${event.aggregateBuys === 1 ? '' : 's'}` : null,
+    event.aggregateBuys ? `<b>New Buy:</b> ${escapeHtml(event.aggregateBuys)} buy${event.aggregateBuys === 1 ? '' : 's'}` : null,
     quoteAmount ? `<b>SOL</b> ${escapeHtml(quoteAmount.replace(' SOL', ''))}${usdValue > 0 ? ` (${escapeHtml(money.format(usdValue))})` : ''}` : null,
     tokenAmount > 0 ? `<b>${formatTicker(coin.symbol)}</b> ${escapeHtml(tokens)} (${escapeHtml(formatMultiplier(tokenAmount))})` : null,
-    event.aggregateVolumeUsd ? `<b>DEX activity:</b> ${escapeHtml(money.format(Number(event.aggregateVolumeUsd)))}` : null,
+    event.aggregateVolumeUsd ? `<b>Amount:</b> ${escapeHtml(money.format(Number(event.aggregateVolumeUsd)))}` : null,
     position ? `<b>Position:</b> ${escapeHtml(position)} <i>(Wallet)</i>` : null,
     buyer ? `Buyer: <b>${escapeHtml(buyer)}</b>` : null,
     marketCap ? `<b>MCap:</b> ${escapeHtml(marketCap)}` : null,
@@ -55,23 +53,6 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     renderOgreFooter(),
     SLIME_BORDER
   ].filter(Boolean).join('\n');
-}
-
-function renderBondingCurve(tokenMeta) {
-  const progress = tokenMeta?.bondingProgress == null
-    ? tokenMeta?.complete === true ? 100 : null
-    : Math.max(0, Math.min(100, Number(tokenMeta.bondingProgress)));
-  if (progress == null) return null;
-
-  const totalBlocks = 8;
-  const filled = progress >= 100 ? totalBlocks : Math.round((progress / 100) * totalBlocks);
-  const empty = Math.max(0, totalBlocks - filled);
-  const status = progress >= 100 ? 'BONDED' : 'Bonding Process';
-
-  return [
-    `<b>${number.format(progress)}% ${status}</b>`,
-    `${'🟩'.repeat(filled)}${'⬛'.repeat(empty)}`
-  ].join('\n');
 }
 
 function renderDexPaidLine(dex) {
@@ -101,9 +82,10 @@ function renderSocials(coin, tokenMeta) {
 export function renderAdBlock({ trending, primaryCoin }) {
   const lines = ['', '<b>Top Movers</b>'];
 
-  const ogre = primaryCoin?.symbol?.toUpperCase() === 'OGRE'
-    ? primaryCoin
-    : { symbol: 'OGRE', buyUrl: 'https://pump.fun/coin/5RAZMWd9RiKfodLPQ73cFk4CMoJzTUsATUoRdDThpump' };
+  const ogreFromTrending = trending.find((item) => item.symbol.toUpperCase() === 'OGRE')?.coin;
+  const ogre = ogreFromTrending
+    ?? (primaryCoin?.symbol?.toUpperCase() === 'OGRE' ? primaryCoin : null)
+    ?? { symbol: 'OGRE', buyUrl: 'https://pump.fun/coin/5RAZMWd9RiKfodLPQ73cFk4CMoJzTUsATUoRdDThpump' };
   const ogreLink = ogre.buyUrl ? ` - <a href="${escapeHtml(ogre.buyUrl)}">Buy</a>` : '';
   lines.push(`1. ${formatTicker(ogre.symbol)}${ogreLink}`);
 
