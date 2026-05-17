@@ -25,6 +25,8 @@ const {
   HELIUS_AUTH_HEADER,
   HELIUS_API_KEY,
   HELIUS_WEBHOOK_ID,
+  DEBUG_HELIUS_CHAT_ID,
+  DEBUG_HELIUS_NOTIFICATIONS = 'false',
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
   ALERT_CHAT_ID,
@@ -409,6 +411,7 @@ app.post('/api/helius', async (req, res) => {
 
   await saveLastHeliusPayload(req.body);
   const result = await processHeliusPayload(req.body);
+  await notifyHeliusDebug(req.body, result);
 
   res.json(result);
 });
@@ -442,7 +445,8 @@ async function processHeliusPayload(payload) {
         reason: 'no-buy-events-parsed',
         signature: transaction.signature,
         type: transaction.type,
-        source: transaction.source
+        source: transaction.source,
+        mintsSeen: getMintsSeen(transaction).slice(0, 10)
       });
     }
 
@@ -466,12 +470,66 @@ async function processHeliusPayload(payload) {
   return { ok: true, accepted, ignored };
 }
 
+async function notifyHeliusDebug(payload, result) {
+  if (String(DEBUG_HELIUS_NOTIFICATIONS).toLowerCase() !== 'true') return;
+
+  const debugChatId = DEBUG_HELIUS_CHAT_ID || ALERT_CHAT_ID;
+  if (!debugChatId) return;
+
+  const transactions = Array.isArray(payload) ? payload : [payload];
+  const summary = [
+    '<b>Helius webhook hit</b>',
+    `Transactions: ${transactions.length}`,
+    `Accepted buys: ${result.accepted.length}`,
+    `Ignored: ${result.ignored.length}`,
+    ...transactions.slice(0, 3).map((tx, index) => {
+      const signature = tx.signature ? `${String(tx.signature).slice(0, 8)}...${String(tx.signature).slice(-6)}` : 'none';
+      return `${index + 1}. ${tx.type ?? 'unknown'} / ${tx.source ?? 'unknown'} / ${signature}`;
+    }),
+    result.ignored[0] ? `First ignored: ${result.ignored[0].reason}` : null
+  ].filter(Boolean).join('\n');
+
+  try {
+    await bot.telegram.sendMessage(debugChatId, summary, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
+    });
+  } catch (error) {
+    console.error('Could not send Helius debug notification:', error.message);
+  }
+}
+
 app.get('/api/helius/last', async (_req, res) => {
   try {
     const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
     res.type('json').send(raw);
   } catch {
     res.status(404).json({ error: 'No Helius payload has reached this bot yet.' });
+  }
+});
+
+app.get('/api/helius/last-summary', async (_req, res) => {
+  try {
+    const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
+    const debugPayload = JSON.parse(raw);
+    const transactions = Array.isArray(debugPayload.payload) ? debugPayload.payload : [debugPayload.payload];
+    res.json({
+      ok: true,
+      receivedAt: debugPayload.receivedAt,
+      transactions: transactions.map((tx) => ({
+        signature: tx.signature,
+        type: tx.type,
+        source: tx.source,
+        feePayer: tx.feePayer,
+        mintsSeen: getMintsSeen(tx),
+        tokenTransfers: (tx.tokenTransfers ?? []).length,
+        nativeTransfers: (tx.nativeTransfers ?? []).length,
+        accountData: (tx.accountData ?? []).length,
+        hasSwapEvent: Boolean(tx.events?.swap)
+      }))
+    });
+  } catch (error) {
+    res.status(404).json({ error: 'No saved Helius payload to summarize.', detail: error.message });
   }
 });
 
@@ -805,6 +863,14 @@ function getTokenBalanceChangeOutputs(transaction) {
       })
       .filter((change) => change.mint && Number(change.tokenAmount ?? 0) > 0);
   });
+}
+
+function getMintsSeen(transaction) {
+  return Array.from(new Set([
+    ...(transaction.tokenTransfers ?? []).map((transfer) => transfer.mint),
+    ...getSwapTokenOutputs(transaction).map((transfer) => transfer.mint),
+    ...getTokenBalanceChangeOutputs(transaction).map((transfer) => transfer.mint)
+  ].filter(Boolean)));
 }
 
 function getTokenAmountFromBalanceChange(change) {
