@@ -17,7 +17,7 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
-const SLIME_BORDER = '🟢.·:*¨༺ SLIME ༻¨*:·.🟢';
+const SLIME_BORDER = '━━━━━━━━━━━━━━━━━━━━';
 
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
@@ -64,7 +64,7 @@ function renderBondingCurve(tokenMeta) {
     : Math.max(0, Math.min(100, Number(tokenMeta.bondingProgress)));
   if (progress == null) return null;
 
-  const totalBlocks = 18;
+  const totalBlocks = 8;
   const filled = progress >= 100 ? totalBlocks : Math.round((progress / 100) * totalBlocks);
   const empty = Math.max(0, totalBlocks - filled);
   const status = progress >= 100 ? 'BONDED' : 'Bonding Process';
@@ -100,6 +100,7 @@ export function renderAdBlock({ trending, primaryCoin }) {
 
   const items = trending
     .filter((item) => item.symbol.toUpperCase() !== 'OGRE')
+    .filter((item, index, list) => list.findIndex((other) => other.symbol.toUpperCase() === item.symbol.toUpperCase()) === index)
     .sort((a, b) => Number(b.volumeUsd ?? 0) - Number(a.volumeUsd ?? 0))
     .slice(0, 3);
 
