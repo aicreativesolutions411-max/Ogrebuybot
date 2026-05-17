@@ -1,3 +1,6 @@
+Paste this as your fixed `src/index.js`:
+
+```js
 import 'dotenv/config';
 import express from 'express';
 import fs from 'node:fs/promises';
@@ -15,7 +18,7 @@ import {
   upsertCoin
 } from './store.js';
 import { renderBuyAlert, renderCoinList, renderTrendingList } from './render.js';
-const app = 'express'
+
 const {
   BOT_TOKEN,
   PORT = 3000,
@@ -27,7 +30,7 @@ const {
 } = process.env;
 
 if (!BOT_TOKEN) {
-  throw new Error('BOT_TOKEN is required. Copy .env.example to .env and add your Telegram bot token.');
+  throw new Error('BOT_TOKEN is required.');
 }
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -65,7 +68,7 @@ async function showHelp(ctx) {
     '/testbuy OGRE - send a test buy alert',
     '/addcoin SYMBOL Name | chain | contract | buyUrl - register a coin',
     '',
-    'Real buys come from the /api/buy webhook. Connect that to Helius, Moralis, Bitquery, or another Solana/Pump.fun listener.'
+    'Real buys come from the /api/helius webhook.'
   ].join('\n'));
 }
 
@@ -82,6 +85,7 @@ bot.command('trending', async (ctx) => {
 
 bot.command('track', async (ctx) => {
   const symbol = getUpdateText(ctx).split(/\s+/)[1];
+
   if (!symbol) {
     await ctx.reply('Usage: /track OGRE');
     return;
@@ -89,7 +93,7 @@ bot.command('track', async (ctx) => {
 
   try {
     const coin = await addChannelToCoin(symbol, ctx.chat.id);
-    await ctx.reply(`This chat is now tracking $${coin.symbol}. Make sure the bot is admin if this is a channel.`);
+    await ctx.reply(`This chat is now tracking $${coin.symbol}.`);
   } catch (error) {
     await ctx.reply(error.message);
   }
@@ -114,6 +118,7 @@ bot.command('testbuy', async (ctx) => {
       usdValue: 123.45,
       quoteAmount: 1,
       quoteSymbol: DEFAULT_QUOTE_SYMBOL,
+      buyerSolBalance: 5.25,
       dex: 'test',
       txUrl: coin.website
     }
@@ -144,6 +149,10 @@ bot.command('addcoin', async (ctx) => {
   await ctx.reply(`Added $${coin.symbol} and linked it to this chat.`);
 });
 
+app.get('/', (_req, res) => {
+  res.send('OGRE buy bot is running.');
+});
+
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
@@ -155,6 +164,7 @@ app.post('/api/buy', async (req, res) => {
   }
 
   const parsed = buyEventSchema.safeParse(req.body);
+
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
@@ -165,7 +175,7 @@ app.post('/api/buy', async (req, res) => {
     : await getCoin(parsed.data.symbol);
 
   if (!coin?.enabled) {
-    res.status(404).json({ error: `Coin is not registered or is disabled.` });
+    res.status(404).json({ error: 'Coin is not registered or is disabled.' });
     return;
   }
 
@@ -203,6 +213,7 @@ app.post('/api/helius', async (req, res) => {
       }
 
       const result = await postBuyAlert({ coin, eventInput });
+
       if (result.duplicate) {
         ignored.push({ reason: 'duplicate', signature: eventInput.txSignature });
       } else {
@@ -228,6 +239,10 @@ bot.catch((error, ctx) => {
 });
 
 async function main() {
+  app.listen(Number(PORT), () => {
+    console.log(`Buy bot API listening on http://localhost:${PORT}`);
+  });
+
   const me = await bot.telegram.getMe();
   console.log(`Telegram bot connected as @${me.username}`);
 
@@ -241,14 +256,8 @@ async function main() {
     { command: 'addcoin', description: 'Register another coin' }
   ]);
 
-  await bot.launch({
-    dropPendingUpdates: true
-  });
-  console.log('Telegram polling started. Leave this window open.');
-
-  app.listen(Number(PORT), () => {
-    console.log(`Buy bot API listening on http://localhost:${PORT}`);
-  });
+  await bot.launch({ dropPendingUpdates: true });
+  console.log('Telegram polling started.');
 }
 
 main().catch((error) => {
@@ -256,7 +265,7 @@ main().catch((error) => {
   console.error(error);
 
   if (String(error.message ?? '').includes('409')) {
-    console.error('Another copy of this bot is already running. Close the other terminal/process and try again.');
+    console.error('Another copy of this bot is already running. Close the other instance and try again.');
   }
 
   process.exit(1);
@@ -316,6 +325,7 @@ async function parseHeliusTransaction(transaction) {
     const buyerSolBalance = await getSolBalance(buyer);
     const priceUsd = await getTokenPriceUsd(contract);
     const tokenAmount = Number(transfer.tokenAmount ?? 0);
+
     if (tokenAmount <= 0) continue;
 
     events.push({
@@ -323,7 +333,7 @@ async function parseHeliusTransaction(transaction) {
       buyer,
       tokenAmount,
       usdValue: priceUsd ? tokenAmount * priceUsd : 0,
-      quoteAmount: solSpent || undefined,
+      quoteAmount: solSpent,
       quoteSymbol: 'SOL',
       buyerSolBalance,
       dex: source,
@@ -373,8 +383,10 @@ async function getSolBalance(wallet) {
         params: [wallet]
       })
     });
+
     const body = await response.json();
     const lamports = body.result?.value;
+
     return typeof lamports === 'number' ? lamports / 1_000_000_000 : undefined;
   } catch (error) {
     console.error(`Could not fetch SOL balance for ${wallet}:`, error.message);
@@ -400,3 +412,4 @@ async function saveLastHeliusPayload(payload) {
     console.error('Could not save Helius debug payload:', error.message);
   }
 }
+```
