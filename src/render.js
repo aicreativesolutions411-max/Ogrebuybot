@@ -17,7 +17,7 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
-const GREEN_BORDER = '🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩';
+const SLIME_BORDER = '🟢.·:*¨༺ SLIME ༻¨*:·.🟢';
 
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
@@ -33,10 +33,9 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
   const socialsLine = renderSocials(coin, tokenMeta);
 
   return [
-    GREEN_BORDER,
-    '<b>..:: SLIME BUY ALERT ::..</b>',
+    SLIME_BORDER,
     `<b>NEW | ${escapeHtml(tokenName)} BUY!</b>`,
-    'by @MajorBuyBot',
+    'by @OgreBuyBot',
     '',
     renderBondingCurve(tokenMeta),
     '',
@@ -52,10 +51,10 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     '',
     renderDexPaidLine(event.dex),
     '',
-    [txLine, renderVoteLink(), buyLine].filter(Boolean).join(' | '),
+    [txLine, buyLine].filter(Boolean).join(' | '),
     renderAdBlock({ trending, primaryCoin }),
     renderOgreFooter(),
-    GREEN_BORDER
+    SLIME_BORDER
   ].filter(Boolean).join('\n');
 }
 
@@ -71,19 +70,13 @@ function renderBondingCurve(tokenMeta) {
   const status = progress >= 100 ? 'BONDED' : 'Bonding Process';
 
   return [
-    `<b>${number.format(progress)}% ${status}</b>`,
-    `${'🟩'.repeat(filled)}${'⬛'.repeat(empty)}`,
-    progress >= 100 ? '<b>FULL SLIME</b>' : '<b>SLIME LOADING</b>'
+    `<b>${number.format(progress)}% ${status}</b> ${'🟩'.repeat(filled)}${'⬛'.repeat(empty)}`
   ].join('\n');
 }
 
 function renderDexPaidLine(dex) {
   const label = dex ? `DEX PAID | ${dex}` : 'DEX PAID';
   return `<b>[ ${escapeHtml(label)} ]</b>`;
-}
-
-function renderVoteLink() {
-  return '<a href="https://t.me/MajorBuyBot">Vote</a>';
 }
 
 function renderSocials(coin, tokenMeta) {

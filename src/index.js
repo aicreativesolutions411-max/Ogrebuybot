@@ -1611,6 +1611,17 @@ async function getPumpFunMetadata(contract) {
       imageUrl: coin.image_uri || coin.image || coin.metadata?.image,
       complete,
       bondingProgress,
+      rawProgressFields: {
+        bonding_curve_progress: coin.bonding_curve_progress,
+        bondingCurveProgress: coin.bondingCurveProgress,
+        graduationPercent: coin.graduationPercent,
+        progress: coin.progress,
+        real_token_reserves: coin.real_token_reserves,
+        initial_real_token_reserves: coin.initial_real_token_reserves,
+        real_sol_reserves: coin.real_sol_reserves,
+        usd_market_cap: coin.usd_market_cap,
+        market_cap: coin.market_cap
+      },
       marketCapUsd: coin.usd_market_cap ?? coin.market_cap,
       twitter: coin.twitter,
       telegram: coin.telegram,
@@ -1623,9 +1634,6 @@ async function getPumpFunMetadata(contract) {
 }
 
 function getPumpFunBondingProgress(coin) {
-  const reserveProgress = getPumpFunReserveProgress(coin);
-  if (reserveProgress != null) return reserveProgress;
-
   const directProgress = Number(
     coin.bonding_curve_progress
       ?? coin.bondingCurveProgress
@@ -1636,6 +1644,9 @@ function getPumpFunBondingProgress(coin) {
   if (Number.isFinite(directProgress)) {
     return directProgress <= 1 ? directProgress * 100 : directProgress;
   }
+
+  const reserveProgress = getPumpFunReserveProgress(coin);
+  if (reserveProgress != null) return reserveProgress;
 
   const usdMarketCap = Number(coin.usd_market_cap ?? coin.market_cap);
   const graduationMarketCap = Number(coin.king_of_the_hill_market_cap ?? coin.raydium_migration_market_cap ?? 69000);
@@ -1652,8 +1663,6 @@ function getPumpFunReserveProgress(coin) {
   const initialRealTokenReserves = Number(
     coin.initial_real_token_reserves
       ?? coin.initialRealTokenReserves
-      ?? coin.token_total_supply
-      ?? coin.tokenTotalSupply
   );
 
   if (
@@ -1664,10 +1673,9 @@ function getPumpFunReserveProgress(coin) {
     return Math.max(0, Math.min(100, ((initialRealTokenReserves - realTokenReserves) / initialRealTokenReserves) * 100));
   }
 
-  const virtualSolReserves = Number(coin.virtual_sol_reserves ?? coin.virtualSolReserves);
   const realSolReserves = Number(coin.real_sol_reserves ?? coin.realSolReserves);
 
-  if (Number.isFinite(virtualSolReserves) && Number.isFinite(realSolReserves) && virtualSolReserves > 0) {
+  if (Number.isFinite(realSolReserves) && realSolReserves > 0) {
     const estimatedCompletionLamports = 85 * 1_000_000_000;
     return Math.max(0, Math.min(100, (realSolReserves / estimatedCompletionLamports) * 100));
   }
