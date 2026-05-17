@@ -15,7 +15,7 @@ import {
   upsertCoin
 } from './store.js';
 import { renderBuyAlert, renderCoinList, renderTrendingList } from './render.js';
-const app = 'express'
+
 const {
   BOT_TOKEN,
   PORT = 3000,
@@ -29,7 +29,7 @@ const {
 if (!BOT_TOKEN) {
   throw new Error('BOT_TOKEN is required. Copy .env.example to .env and add your Telegram bot token.');
 }
-app.get('/health'(req,res)<(res.status(200).send "ok"
+
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
@@ -61,6 +61,7 @@ async function showHelp(ctx) {
     '/help - show this menu',
     '/coins - list tracked coins',
     '/trending - show 24h trending volume',
+    '/chatid - show this Telegram chat id',
     '/track OGRE - add this chat/channel to a coin',
     '/testbuy OGRE - send a test buy alert',
     '/addcoin SYMBOL Name | chain | contract | buyUrl - register a coin',
@@ -78,6 +79,10 @@ bot.command('trending', async (ctx) => {
   const primaryCoin = await getPrimaryCoin();
   const trending = await getTrendingCoins(Number(TRENDING_LIMIT));
   await ctx.reply(renderTrendingList(trending, primaryCoin), { disable_web_page_preview: true });
+});
+
+bot.command('chatid', async (ctx) => {
+  await ctx.reply(`This chat id is: ${ctx.chat.id}`);
 });
 
 bot.command('track', async (ctx) => {
@@ -142,6 +147,10 @@ bot.command('addcoin', async (ctx) => {
   });
 
   await ctx.reply(`Added $${coin.symbol} and linked it to this chat.`);
+});
+
+app.get('/', (_req, res) => {
+  res.send('OGRE buy bot is running.');
 });
 
 app.get('/health', (_req, res) => {
@@ -228,6 +237,10 @@ bot.catch((error, ctx) => {
 });
 
 async function main() {
+  app.listen(Number(PORT), () => {
+    console.log(`Buy bot API listening on http://localhost:${PORT}`);
+  });
+
   const me = await bot.telegram.getMe();
   console.log(`Telegram bot connected as @${me.username}`);
 
@@ -236,6 +249,7 @@ async function main() {
     { command: 'help', description: 'Show bot commands' },
     { command: 'coins', description: 'List tracked coins' },
     { command: 'trending', description: 'Show 24h trending volume' },
+    { command: 'chatid', description: 'Show this chat id' },
     { command: 'track', description: 'Track a coin in this chat' },
     { command: 'testbuy', description: 'Send a test buy alert' },
     { command: 'addcoin', description: 'Register another coin' }
@@ -245,10 +259,6 @@ async function main() {
     dropPendingUpdates: true
   });
   console.log('Telegram polling started. Leave this window open.');
-
-  app.listen(Number(PORT), () => {
-    console.log(`Buy bot API listening on http://localhost:${PORT}`);
-  });
 }
 
 main().catch((error) => {
@@ -292,6 +302,12 @@ async function postBuyAlert({ coin, eventInput }) {
       disable_web_page_preview: true
     }))
   );
+
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error(`Failed to send $${coin.symbol} buy alert to chat ${channels[index]}:`, result.reason);
+    }
+  });
 
   return { event, results };
 }
