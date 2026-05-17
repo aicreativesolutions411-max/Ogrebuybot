@@ -27,6 +27,8 @@ const {
   HELIUS_WEBHOOK_ID,
   DEBUG_HELIUS_CHAT_ID,
   DEBUG_HELIUS_NOTIFICATIONS = 'false',
+  ENABLE_HELIUS_POLLING = 'false',
+  HELIUS_POLL_INTERVAL_MS = 15000,
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
   ALERT_CHAT_ID,
@@ -119,6 +121,16 @@ bot.command('sync_helius', async (ctx) => {
 
   const heliusResult = await ensureHeliusTracksContracts(contracts);
   await ctx.reply(renderHeliusSyncStatus(heliusResult) || 'Helius sync did not run. Check env vars.');
+});
+
+bot.command('scan_now', async (ctx) => {
+  const result = await pollTrackedContractsOnce();
+  await ctx.reply([
+    'Manual chain scan finished.',
+    `Scanned contracts: ${result.scannedContracts}`,
+    `Accepted buys: ${result.accepted}`,
+    `Ignored transactions: ${result.ignored}`
+  ].join('\n'));
 });
 
 bot.on('my_chat_member', async (ctx) => {
@@ -499,6 +511,66 @@ async function notifyHeliusDebug(payload, result) {
   }
 }
 
+function startHeliusPolling() {
+  const interval = Math.max(5000, Number(HELIUS_POLL_INTERVAL_MS) || 15000);
+  console.log(`Helius polling enabled. Scanning tracked contracts every ${interval}ms.`);
+
+  pollTrackedContractsOnce().catch((error) => {
+    console.error('Initial Helius poll failed:', error.message);
+  });
+
+  setInterval(() => {
+    pollTrackedContractsOnce().catch((error) => {
+      console.error('Helius poll failed:', error.message);
+    });
+  }, interval);
+}
+
+async function pollTrackedContractsOnce() {
+  if (!HELIUS_API_KEY) {
+    console.warn('Helius polling skipped. HELIUS_API_KEY is missing.');
+    return { scannedContracts: 0, accepted: 0, ignored: 0 };
+  }
+
+  const store = await readStore();
+  const contracts = Array.from(new Set(
+    store.coins
+      .filter((coin) => coin.enabled && coin.contract && (coin.channels ?? []).length > 0)
+      .map((coin) => coin.contract)
+  ));
+
+  let accepted = 0;
+  let ignored = 0;
+
+  for (const contract of contracts) {
+    const transactions = await fetchRecentHeliusTransactionsForAddress(contract);
+    const result = await processHeliusPayload(transactions);
+    accepted += result.accepted.length;
+    ignored += result.ignored.length;
+  }
+
+  if (accepted > 0 || String(DEBUG_HELIUS_NOTIFICATIONS).toLowerCase() === 'true') {
+    console.log(`Helius poll scanned ${contracts.length} contracts, accepted ${accepted}, ignored ${ignored}.`);
+  }
+
+  return { scannedContracts: contracts.length, accepted, ignored };
+}
+
+async function fetchRecentHeliusTransactionsForAddress(address) {
+  const url = new URL(`https://api-mainnet.helius-rpc.com/v0/addresses/${address}/transactions`);
+  url.searchParams.set('api-key', HELIUS_API_KEY);
+  url.searchParams.set('limit', '10');
+
+  const response = await fetch(url);
+  const body = await response.json().catch(() => []);
+
+  if (!response.ok) {
+    throw new Error(`Helius address history failed for ${address}: ${body.error ?? body.message ?? response.status}`);
+  }
+
+  return Array.isArray(body) ? body : [];
+}
+
 app.get('/api/helius/last', async (_req, res) => {
   try {
     const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
@@ -554,6 +626,7 @@ async function main() {
     { command: 'chatid', description: 'Show this chat id' },
     { command: 'chats', description: 'Show tracked chats' },
     { command: 'sync_helius', description: 'Sync tracked CAs to Helius' },
+    { command: 'scan_now', description: 'Scan tracked CAs for recent buys' },
     { command: 'track', description: 'Track a coin in this chat' },
     { command: 'setcoin', description: 'Register this chat for a coin CA' },
     { command: 'setca', description: 'Register this chat for a coin CA' },
@@ -575,6 +648,10 @@ async function main() {
       dropPendingUpdates: true
     });
     console.log('Telegram polling started. Leave this window open.');
+  }
+
+  if (String(ENABLE_HELIUS_POLLING).toLowerCase() === 'true') {
+    startHeliusPolling();
   }
 }
 
