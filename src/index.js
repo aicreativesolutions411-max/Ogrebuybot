@@ -21,6 +21,8 @@ const {
   PORT = 3000,
   WEBHOOK_SECRET,
   HELIUS_AUTH_HEADER,
+  TELEGRAM_WEBHOOK_URL,
+  BASE_URL,
   SOLANA_RPC_HTTP = 'https://api.mainnet-beta.solana.com',
   DEFAULT_QUOTE_SYMBOL = 'SOL',
   TRENDING_LIMIT = 5
@@ -32,8 +34,11 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
+const telegramWebhookPath = `/telegram/${BOT_TOKEN}`;
+const telegramWebhookUrl = TELEGRAM_WEBHOOK_URL ?? (BASE_URL ? `${BASE_URL.replace(/\/$/, '')}${telegramWebhookPath}` : null);
 
 app.use(express.json({ limit: '1mb' }));
+app.use(telegramWebhookPath, bot.webhookCallback(telegramWebhookPath));
 
 const buyEventSchema = z.object({
   symbol: z.string().min(1).optional(),
@@ -157,6 +162,63 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/debug/coins', async (_req, res) => {
+  const store = await readStore();
+  res.json({
+    ok: true,
+    coins: store.coins.map((coin) => ({
+      symbol: coin.symbol,
+      contract: coin.contract,
+      enabled: coin.enabled,
+      channels: coin.channels ?? []
+    }))
+  });
+});
+
+app.get('/api/test-alert/:symbol', async (req, res) => {
+  if (WEBHOOK_SECRET && req.query.secret !== WEBHOOK_SECRET && req.header('x-bot-secret') !== WEBHOOK_SECRET) {
+    res.status(401).json({ error: 'Invalid secret' });
+    return;
+  }
+
+  const coin = await getCoin(req.params.symbol);
+  if (!coin?.enabled) {
+    res.status(404).json({ error: `Unknown coin: ${req.params.symbol}` });
+    return;
+  }
+
+  const { event, results, duplicate } = await postBuyAlert({
+    coin,
+    eventInput: {
+      symbol: coin.symbol,
+      contract: coin.contract,
+      buyer: 'LIVECHECK111111111111111111111111111111111',
+      tokenAmount: 100000,
+      usdValue: 123.45,
+      quoteAmount: 1,
+      quoteSymbol: DEFAULT_QUOTE_SYMBOL,
+      buyerSolBalance: 5.25,
+      dex: 'render-test',
+      txUrl: coin.website
+    }
+  });
+
+  res.json({
+    ok: true,
+    duplicate: Boolean(duplicate),
+    channels: coin.channels ?? [],
+    sent: results.filter((result) => result.status === 'fulfilled').length,
+    failed: results
+      .map((result, index) => ({ result, chatId: coin.channels?.[index] }))
+      .filter((item) => item.result.status === 'rejected')
+      .map((item) => ({
+        chatId: item.chatId,
+        error: item.result.reason?.description ?? item.result.reason?.message ?? String(item.result.reason)
+      })),
+    event
+  });
+});
+
 app.post('/api/buy', async (req, res) => {
   if (WEBHOOK_SECRET && req.header('x-bot-secret') !== WEBHOOK_SECRET) {
     res.status(401).json({ error: 'Invalid secret' });
@@ -255,10 +317,20 @@ async function main() {
     { command: 'addcoin', description: 'Register another coin' }
   ]);
 
-  await bot.launch({
-    dropPendingUpdates: true
-  });
-  console.log('Telegram polling started. Leave this window open.');
+  if (telegramWebhookUrl) {
+    await bot.telegram.setWebhook(telegramWebhookUrl, {
+      drop_pending_updates: true
+    });
+    console.log(`Telegram webhook set to ${telegramWebhookUrl}`);
+  } else {
+    await bot.telegram.deleteWebhook({
+      drop_pending_updates: true
+    });
+    await bot.launch({
+      dropPendingUpdates: true
+    });
+    console.log('Telegram polling started. Leave this window open.');
+  }
 }
 
 main().catch((error) => {
@@ -313,7 +385,10 @@ async function postBuyAlert({ coin, eventInput }) {
 }
 
 async function parseHeliusTransaction(transaction) {
-  const tokenTransfers = transaction.tokenTransfers ?? [];
+  const tokenTransfers = [
+    ...(transaction.tokenTransfers ?? []),
+    ...getSwapTokenOutputs(transaction)
+  ];
   const nativeTransfers = transaction.nativeTransfers ?? [];
   const signature = transaction.signature;
   const source = transaction.source ?? transaction.type ?? 'helius';
@@ -326,7 +401,7 @@ async function parseHeliusTransaction(transaction) {
     const buyer = transfer.toUserAccount;
     if (!buyer) continue;
 
-    const solSpent = getSolSpentByWallet(nativeTransfers, buyer);
+    const solSpent = getSolSpentByWallet(transaction, nativeTransfers, buyer);
     if (solSpent <= 0) continue;
 
     const buyerSolBalance = await getSolBalance(buyer);
@@ -351,12 +426,48 @@ async function parseHeliusTransaction(transaction) {
   return events;
 }
 
-function getSolSpentByWallet(nativeTransfers, wallet) {
+function getSwapTokenOutputs(transaction) {
+  const outputs = transaction.events?.swap?.tokenOutputs ?? [];
+
+  return outputs.map((output) => ({
+    mint: output.mint,
+    toUserAccount: output.userAccount ?? output.toUserAccount ?? output.account,
+    tokenAmount: output.tokenAmount ?? parseRawTokenAmount(output.rawTokenAmount)
+  }));
+}
+
+function parseRawTokenAmount(rawTokenAmount) {
+  if (!rawTokenAmount) return undefined;
+
+  const amount = Number(rawTokenAmount.tokenAmount ?? rawTokenAmount.amount);
+  const decimals = Number(rawTokenAmount.decimals ?? 0);
+  if (!Number.isFinite(amount)) return undefined;
+
+  return amount / 10 ** decimals;
+}
+
+function getSolSpentByWallet(transaction, nativeTransfers, wallet) {
   const lamportsSpent = nativeTransfers
     .filter((nativeTransfer) => nativeTransfer.fromUserAccount === wallet)
     .reduce((total, nativeTransfer) => total + Number(nativeTransfer.amount ?? 0), 0);
 
-  return lamportsSpent / 1_000_000_000;
+  if (lamportsSpent > 0) {
+    return lamportsSpent / 1_000_000_000;
+  }
+
+  const swapNativeInput = transaction.events?.swap?.nativeInput;
+  if (swapNativeInput?.amount) {
+    const accountMatches = !swapNativeInput.account || swapNativeInput.account === wallet;
+    if (accountMatches) {
+      return Number(swapNativeInput.amount) / 1_000_000_000;
+    }
+  }
+
+  const balanceChange = (transaction.accountData ?? [])
+    .filter((account) => account.account === wallet && Number(account.nativeBalanceChange ?? 0) < 0)
+    .reduce((total, account) => total + Math.abs(Number(account.nativeBalanceChange ?? 0)), 0);
+
+  return balanceChange / 1_000_000_000;
 }
 
 async function getTokenPriceUsd(contract) {
