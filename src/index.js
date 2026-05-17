@@ -3,6 +3,7 @@ import express from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Telegraf } from 'telegraf';
+import WebSocket from 'ws';
 import { z } from 'zod';
 import {
   addChannelToCoin,
@@ -29,6 +30,8 @@ const {
   DEBUG_HELIUS_NOTIFICATIONS = 'false',
   ENABLE_HELIUS_POLLING = 'false',
   HELIUS_POLL_INTERVAL_MS = 15000,
+  ENABLE_BITQUERY_STREAM = 'false',
+  BITQUERY_TOKEN,
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
   ALERT_CHAT_ID,
@@ -46,6 +49,8 @@ const app = express();
 const telegramWebhookPath = `/telegram/${BOT_TOKEN}`;
 const telegramWebhookUrl = TELEGRAM_WEBHOOK_URL ?? (BASE_URL ? `${BASE_URL.replace(/\/$/, '')}${telegramWebhookPath}` : null);
 let botUsername = '';
+let bitquerySocket = null;
+let bitqueryRestartTimer = null;
 
 app.use(bot.webhookCallback(telegramWebhookPath));
 app.use(express.json({ limit: '1mb' }));
@@ -179,6 +184,7 @@ bot.command(['setcoin', 'setca'], async (ctx) => {
     website: buyUrl
   });
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
+  restartBitqueryStreamSoon();
 
   await ctx.reply([
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
@@ -232,6 +238,7 @@ bot.command('addcoin', async (ctx) => {
     channels: [String(ctx.chat.id)]
   });
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
+  restartBitqueryStreamSoon();
 
   await ctx.reply([
     `Added $${coin.symbol} and linked it to this chat.`,
@@ -571,6 +578,157 @@ async function fetchRecentHeliusTransactionsForAddress(address) {
   return Array.isArray(body) ? body : [];
 }
 
+async function startBitqueryStream() {
+  if (!BITQUERY_TOKEN) {
+    console.warn('Bitquery stream skipped. Set BITQUERY_TOKEN on Render.');
+    return;
+  }
+
+  const contracts = await getTrackedContracts();
+  if (contracts.length === 0) {
+    console.warn('Bitquery stream skipped. No tracked contracts yet.');
+    return;
+  }
+
+  if (bitquerySocket) {
+    bitquerySocket.close();
+    bitquerySocket = null;
+  }
+
+  const query = buildBitquerySolanaBuysSubscription(contracts);
+  const socket = new WebSocket(`wss://streaming.bitquery.io/graphql?token=${BITQUERY_TOKEN}`, ['graphql-ws']);
+  bitquerySocket = socket;
+
+  socket.on('open', () => {
+    console.log(`Connected to Bitquery stream for ${contracts.length} tracked CA(s).`);
+    socket.send(JSON.stringify({ type: 'connection_init' }));
+  });
+
+  socket.on('message', async (data) => {
+    try {
+      const response = JSON.parse(data.toString());
+
+      if (response.type === 'connection_ack') {
+        socket.send(JSON.stringify({
+          type: 'start',
+          id: 'tracked-solana-buys',
+          payload: { query }
+        }));
+        return;
+      }
+
+      if (response.type === 'data') {
+        await processBitqueryMessage(response.payload?.data);
+        return;
+      }
+
+      if (response.type === 'error') {
+        console.error('Bitquery stream error:', JSON.stringify(response.payload));
+      }
+    } catch (error) {
+      console.error('Could not process Bitquery message:', error.message);
+    }
+  });
+
+  socket.on('close', () => {
+    console.warn('Bitquery stream disconnected. Reconnecting soon.');
+    if (bitquerySocket === socket) {
+      bitquerySocket = null;
+      restartBitqueryStreamSoon();
+    }
+  });
+
+  socket.on('error', (error) => {
+    console.error('Bitquery websocket error:', error.message);
+  });
+}
+
+async function getTrackedContracts() {
+  const store = await readStore();
+  return Array.from(new Set(
+    store.coins
+      .filter((coin) => coin.enabled && coin.contract && (coin.channels ?? []).length > 0)
+      .map((coin) => coin.contract)
+  ));
+}
+
+function buildBitquerySolanaBuysSubscription(contracts) {
+  const quotedContracts = contracts.map((contract) => `"${contract}"`).join(', ');
+
+  return `
+    subscription TrackedSolanaBuys {
+      Solana {
+        DEXTrades(
+          where: {
+            Transaction: { Result: { Success: true } }
+            Trade: { Buy: { Currency: { MintAddress: { in: [${quotedContracts}] } } } }
+          }
+        ) {
+          Block { Time }
+          Transaction { Signature }
+          Trade {
+            Dex { ProtocolName ProtocolFamily }
+            Buy {
+              Amount
+              PriceInUSD
+              Account { Address }
+              Currency { MintAddress Symbol Name }
+            }
+            Sell {
+              Amount
+              Account { Address }
+              Currency { MintAddress Symbol Name }
+            }
+          }
+        }
+      }
+    }
+  `;
+}
+
+async function processBitqueryMessage(data) {
+  const trades = data?.Solana?.DEXTrades ?? [];
+
+  for (const row of trades) {
+    const buy = row.Trade?.Buy;
+    const sell = row.Trade?.Sell;
+    const contract = buy?.Currency?.MintAddress;
+    const coin = contract ? await getCoinByContract(contract) : null;
+
+    if (!coin?.enabled) continue;
+
+    const tokenAmount = Number(buy.Amount ?? 0);
+    if (tokenAmount <= 0) continue;
+
+    const priceUsd = Number(buy.PriceInUSD ?? 0);
+    const sellSymbol = sell?.Currency?.Symbol || DEFAULT_QUOTE_SYMBOL;
+    const eventInput = {
+      contract,
+      buyer: buy.Account?.Address ?? sell?.Account?.Address,
+      tokenAmount,
+      usdValue: Number.isFinite(priceUsd) ? tokenAmount * priceUsd : 0,
+      quoteAmount: Number(sell?.Amount ?? 0) || undefined,
+      quoteSymbol: sellSymbol,
+      dex: row.Trade?.Dex?.ProtocolName ?? row.Trade?.Dex?.ProtocolFamily ?? 'Bitquery DEX',
+      txSignature: row.Transaction?.Signature,
+      txUrl: row.Transaction?.Signature ? `https://solscan.io/tx/${row.Transaction.Signature}` : undefined
+    };
+
+    await postBuyAlert({ coin, eventInput });
+  }
+}
+
+function restartBitqueryStreamSoon() {
+  if (String(ENABLE_BITQUERY_STREAM).toLowerCase() !== 'true') return;
+
+  clearTimeout(bitqueryRestartTimer);
+  bitqueryRestartTimer = setTimeout(() => {
+    startBitqueryStream().catch((error) => {
+      console.error('Bitquery stream restart failed:', error.message);
+    });
+  }, 3000);
+}
+
 app.get('/api/helius/last', async (_req, res) => {
   try {
     const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
@@ -652,6 +810,12 @@ async function main() {
 
   if (String(ENABLE_HELIUS_POLLING).toLowerCase() === 'true') {
     startHeliusPolling();
+  }
+
+  if (String(ENABLE_BITQUERY_STREAM).toLowerCase() === 'true') {
+    startBitqueryStream().catch((error) => {
+      console.error('Bitquery stream failed to start:', error.message);
+    });
   }
 }
 
@@ -761,6 +925,7 @@ async function setCoinForChat(ctx, args) {
     website: buyUrl
   });
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
+  restartBitqueryStreamSoon();
 
   await ctx.reply([
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
