@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { Connection, PublicKey } from '@solana/web3.js';
 import { Telegraf } from 'telegraf';
 import WebSocket from 'ws';
 import { z } from 'zod';
@@ -34,6 +35,10 @@ const {
   BITQUERY_TOKEN,
   ENABLE_PUMPPORTAL_STREAM = 'false',
   PUMPPORTAL_API_KEY,
+  ENABLE_NATIVE_SOLANA_WATCHER = 'false',
+  ENABLE_DEXSCREENER_POLLING = 'false',
+  DEXSCREENER_POLL_INTERVAL_MS = 20000,
+  SOLANA_WS_URL,
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
   ALERT_CHAT_ID,
@@ -55,6 +60,11 @@ let bitquerySocket = null;
 let bitqueryRestartTimer = null;
 let pumpPortalSocket = null;
 let pumpPortalRestartTimer = null;
+let nativeSolanaConnection = null;
+let nativeSolanaSubscriptionIds = [];
+const nativeSolanaSeenSignatures = new Set();
+const dexScreenerState = new Map();
+const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
 app.use(bot.webhookCallback(telegramWebhookPath));
 app.use(express.json({ limit: '1mb' }));
@@ -190,6 +200,7 @@ bot.command(['setcoin', 'setca'], async (ctx) => {
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
   restartBitqueryStreamSoon();
   restartPumpPortalStreamSoon();
+  restartNativeSolanaWatcherSoon();
 
   await ctx.reply([
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
@@ -245,6 +256,7 @@ bot.command('addcoin', async (ctx) => {
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
   restartBitqueryStreamSoon();
   restartPumpPortalStreamSoon();
+  restartNativeSolanaWatcherSoon();
 
   await ctx.reply([
     `Added $${coin.symbol} and linked it to this chat.`,
@@ -817,6 +829,242 @@ function restartPumpPortalStreamSoon() {
   }, 3000);
 }
 
+async function startNativeSolanaWatcher() {
+  const contracts = await getTrackedContracts();
+  if (contracts.length === 0) {
+    console.warn('Native Solana watcher skipped. No tracked contracts yet.');
+    return;
+  }
+
+  await stopNativeSolanaWatcher();
+
+  const wsUrl = SOLANA_WS_URL || SOLANA_RPC_HTTP.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
+  nativeSolanaConnection = new Connection(SOLANA_RPC_HTTP, {
+    commitment: 'confirmed',
+    wsEndpoint: wsUrl
+  });
+
+  const watchAddresses = new Map();
+
+  for (const contract of contracts) {
+    try {
+      const mint = new PublicKey(contract);
+      watchAddresses.set(mint.toBase58(), { contract, kind: 'mint' });
+      watchAddresses.set(getPumpBondingCurvePda(mint).toBase58(), { contract, kind: 'pump-bonding-curve' });
+    } catch (error) {
+      console.error(`Invalid Solana mint for native watcher: ${contract}`, error.message);
+    }
+  }
+
+  for (const [address, info] of watchAddresses) {
+    const subscriptionId = nativeSolanaConnection.onLogs(
+      new PublicKey(address),
+      (logs) => handleNativeSolanaLogs(logs, info).catch((error) => {
+        console.error('Native Solana log handler failed:', error.message);
+      }),
+      'confirmed'
+    );
+    nativeSolanaSubscriptionIds.push(subscriptionId);
+  }
+
+  console.log(`Native Solana watcher subscribed to ${watchAddresses.size} address(es) for ${contracts.length} tracked CA(s).`);
+}
+
+async function stopNativeSolanaWatcher() {
+  if (!nativeSolanaConnection) {
+    nativeSolanaSubscriptionIds = [];
+    return;
+  }
+
+  await Promise.allSettled(
+    nativeSolanaSubscriptionIds.map((id) => nativeSolanaConnection.removeOnLogsListener(id))
+  );
+  nativeSolanaSubscriptionIds = [];
+}
+
+function restartNativeSolanaWatcherSoon() {
+  if (String(ENABLE_NATIVE_SOLANA_WATCHER).toLowerCase() !== 'true') return;
+
+  setTimeout(() => {
+    startNativeSolanaWatcher().catch((error) => {
+      console.error('Native Solana watcher restart failed:', error.message);
+    });
+  }, 3000);
+}
+
+function getPumpBondingCurvePda(mint) {
+  const [bondingCurve] = PublicKey.findProgramAddressSync(
+    [Buffer.from('bonding-curve'), mint.toBuffer()],
+    PUMP_PROGRAM_ID
+  );
+  return bondingCurve;
+}
+
+async function handleNativeSolanaLogs(logs, info) {
+  if (logs.err || !logs.signature) return;
+  if (nativeSolanaSeenSignatures.has(logs.signature)) return;
+  nativeSolanaSeenSignatures.add(logs.signature);
+
+  if (nativeSolanaSeenSignatures.size > 5000) {
+    const oldest = nativeSolanaSeenSignatures.values().next().value;
+    nativeSolanaSeenSignatures.delete(oldest);
+  }
+
+  const transaction = await nativeSolanaConnection.getParsedTransaction(logs.signature, {
+    commitment: 'confirmed',
+    maxSupportedTransactionVersion: 0
+  });
+  if (!transaction?.meta) return;
+
+  const eventInput = parseNativeSolanaBuy(transaction, info.contract, logs.signature);
+  if (!eventInput) return;
+
+  const coin = await getCoinByContract(info.contract);
+  if (!coin?.enabled) return;
+
+  await postBuyAlert({ coin, eventInput });
+}
+
+function parseNativeSolanaBuy(transaction, contract, signature) {
+  const meta = transaction.meta;
+  const accountKeys = transaction.transaction.message.accountKeys.map((key) => key.pubkey.toBase58());
+  const tokenGain = findLargestTokenGain(meta, contract);
+  if (!tokenGain || tokenGain.amount <= 0) return null;
+
+  const buyer = tokenGain.owner || accountKeys[0];
+  const solSpent = findSolSpentByOwner(meta, accountKeys, buyer);
+  if (solSpent <= 0) return null;
+
+  return {
+    contract,
+    buyer,
+    tokenAmount: tokenGain.amount,
+    usdValue: 0,
+    quoteAmount: solSpent,
+    quoteSymbol: 'SOL',
+    dex: 'Native Solana watcher',
+    txSignature: signature,
+    txUrl: `https://solscan.io/tx/${signature}`
+  };
+}
+
+function findLargestTokenGain(meta, contract) {
+  const pre = new Map((meta.preTokenBalances ?? [])
+    .filter((balance) => balance.mint === contract)
+    .map((balance) => [tokenBalanceKey(balance), uiTokenAmount(balance)]));
+  const gains = (meta.postTokenBalances ?? [])
+    .filter((balance) => balance.mint === contract)
+    .map((balance) => {
+      const before = pre.get(tokenBalanceKey(balance)) ?? 0;
+      return {
+        owner: balance.owner,
+        accountIndex: balance.accountIndex,
+        amount: uiTokenAmount(balance) - before
+      };
+    })
+    .filter((gain) => gain.amount > 0)
+    .sort((a, b) => b.amount - a.amount);
+
+  return gains[0];
+}
+
+function tokenBalanceKey(balance) {
+  return `${balance.accountIndex}:${balance.owner ?? ''}`;
+}
+
+function uiTokenAmount(balance) {
+  return Number(balance.uiTokenAmount?.uiAmountString ?? balance.uiTokenAmount?.uiAmount ?? 0);
+}
+
+function findSolSpentByOwner(meta, accountKeys, owner) {
+  const ownerIndex = accountKeys.indexOf(owner);
+  const candidateIndexes = ownerIndex >= 0 ? [ownerIndex, 0] : [0];
+
+  for (const index of candidateIndexes) {
+    const pre = Number(meta.preBalances?.[index] ?? 0);
+    const post = Number(meta.postBalances?.[index] ?? 0);
+    const diff = pre - post;
+    if (diff > 0) return diff / 1_000_000_000;
+  }
+
+  return 0;
+}
+
+function startDexScreenerPolling() {
+  const interval = Math.max(10000, Number(DEXSCREENER_POLL_INTERVAL_MS) || 20000);
+  console.log(`DEX Screener polling enabled. Checking tracked contracts every ${interval}ms.`);
+
+  pollDexScreenerOnce().catch((error) => {
+    console.error('Initial DEX Screener poll failed:', error.message);
+  });
+
+  setInterval(() => {
+    pollDexScreenerOnce().catch((error) => {
+      console.error('DEX Screener poll failed:', error.message);
+    });
+  }, interval);
+}
+
+async function pollDexScreenerOnce() {
+  const store = await readStore();
+  const coins = store.coins.filter((coin) => coin.enabled && coin.contract && (coin.channels ?? []).length > 0);
+
+  for (const coin of coins) {
+    const pair = await getBestDexScreenerPair(coin.contract);
+    if (!pair) continue;
+
+    const stateKey = `${coin.contract}:${pair.pairAddress}`;
+    const currentBuys = Number(pair.txns?.m5?.buys ?? pair.txns?.h1?.buys ?? 0);
+    const currentVolume = Number(pair.volume?.m5 ?? pair.volume?.h1 ?? 0);
+    const previous = dexScreenerState.get(stateKey);
+
+    dexScreenerState.set(stateKey, {
+      buys: currentBuys,
+      volume: currentVolume,
+      seenAt: Date.now()
+    });
+
+    if (!previous) continue;
+
+    const buyDelta = currentBuys - previous.buys;
+    if (buyDelta <= 0) continue;
+
+    const volumeDelta = Math.max(0, currentVolume - previous.volume);
+    await postBuyAlert({
+      coin,
+      eventInput: {
+        contract: coin.contract,
+        buyer: 'DEXSCREENER_AGGREGATE',
+        tokenAmount: 0,
+        usdValue: volumeDelta,
+        aggregateBuys: buyDelta,
+        aggregateVolumeUsd: volumeDelta,
+        marketCap: pair.marketCap,
+        dex: `${pair.dexId ?? 'dex'} aggregate`,
+        txSignature: `dexscreener-${pair.pairAddress}-${currentBuys}-${Date.now()}`,
+        txUrl: pair.url
+      }
+    });
+  }
+}
+
+async function getBestDexScreenerPair(contract) {
+  try {
+    const response = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${contract}`);
+    if (!response.ok) return null;
+
+    const pairs = await response.json();
+    if (!Array.isArray(pairs) || pairs.length === 0) return null;
+
+    return pairs
+      .filter((pair) => pair.pairAddress)
+      .sort((a, b) => Number(b.liquidity?.usd ?? 0) - Number(a.liquidity?.usd ?? 0))[0] ?? null;
+  } catch (error) {
+    console.error(`DEX Screener polling failed for ${contract}:`, error.message);
+    return null;
+  }
+}
+
 app.get('/api/helius/last', async (_req, res) => {
   try {
     const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
@@ -910,6 +1158,16 @@ async function main() {
     startPumpPortalStream().catch((error) => {
       console.error('PumpPortal stream failed to start:', error.message);
     });
+  }
+
+  if (String(ENABLE_NATIVE_SOLANA_WATCHER).toLowerCase() === 'true') {
+    startNativeSolanaWatcher().catch((error) => {
+      console.error('Native Solana watcher failed to start:', error.message);
+    });
+  }
+
+  if (String(ENABLE_DEXSCREENER_POLLING).toLowerCase() === 'true') {
+    startDexScreenerPolling();
   }
 }
 
@@ -1021,6 +1279,7 @@ async function setCoinForChat(ctx, args) {
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
   restartBitqueryStreamSoon();
   restartPumpPortalStreamSoon();
+  restartNativeSolanaWatcherSoon();
 
   await ctx.reply([
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
