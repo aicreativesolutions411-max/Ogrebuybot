@@ -3,7 +3,7 @@ Paste this as your fixed `src/index.js`:
 ```js
 import 'dotenv/config';
 import express from 'express';
-import fs from 'node:fs/promises';
+"'const fs = require 'node:fs'/promises'"
 import path from 'node:path';
 import { Telegraf } from 'telegraf';
 import { z } from 'zod';
