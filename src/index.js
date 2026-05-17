@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { Telegraf } from 'telegraf';
 import { z } from 'zod';
 import {
@@ -178,10 +180,12 @@ app.post('/api/buy', async (req, res) => {
 });
 
 app.post('/api/helius', async (req, res) => {
-  if (HELIUS_AUTH_HEADER && req.header('authorization') !== HELIUS_AUTH_HEADER) {
+  if (!isValidHeliusAuth(req.header('authorization'))) {
     res.status(401).json({ error: 'Invalid Helius authorization header' });
     return;
   }
+
+  await saveLastHeliusPayload(req.body);
 
   const transactions = Array.isArray(req.body) ? req.body : [req.body];
   const accepted = [];
@@ -208,6 +212,15 @@ app.post('/api/helius', async (req, res) => {
   }
 
   res.json({ ok: true, accepted, ignored });
+});
+
+app.get('/api/helius/last', async (_req, res) => {
+  try {
+    const raw = await fs.readFile(path.resolve('data', 'last-helius-payload.json'), 'utf8');
+    res.type('json').send(raw);
+  } catch {
+    res.status(404).json({ error: 'No Helius payload has reached this bot yet.' });
+  }
 });
 
 bot.catch((error, ctx) => {
@@ -297,13 +310,13 @@ async function parseHeliusTransaction(transaction) {
     const buyer = transfer.toUserAccount;
     if (!buyer) continue;
 
-    const solSpent = nativeTransfers
-      .filter((nativeTransfer) => nativeTransfer.fromUserAccount === buyer)
-      .reduce((total, nativeTransfer) => total + Number(nativeTransfer.amount ?? 0), 0) / 1_000_000_000;
+    const solSpent = getSolSpentByWallet(nativeTransfers, buyer);
+    if (solSpent <= 0) continue;
 
     const buyerSolBalance = await getSolBalance(buyer);
     const priceUsd = await getTokenPriceUsd(contract);
     const tokenAmount = Number(transfer.tokenAmount ?? 0);
+    if (tokenAmount <= 0) continue;
 
     events.push({
       contract,
@@ -320,6 +333,14 @@ async function parseHeliusTransaction(transaction) {
   }
 
   return events;
+}
+
+function getSolSpentByWallet(nativeTransfers, wallet) {
+  const lamportsSpent = nativeTransfers
+    .filter((nativeTransfer) => nativeTransfer.fromUserAccount === wallet)
+    .reduce((total, nativeTransfer) => total + Number(nativeTransfer.amount ?? 0), 0);
+
+  return lamportsSpent / 1_000_000_000;
 }
 
 async function getTokenPriceUsd(contract) {
@@ -358,5 +379,24 @@ async function getSolBalance(wallet) {
   } catch (error) {
     console.error(`Could not fetch SOL balance for ${wallet}:`, error.message);
     return undefined;
+  }
+}
+
+function isValidHeliusAuth(authHeader) {
+  if (!HELIUS_AUTH_HEADER) return true;
+  return authHeader === HELIUS_AUTH_HEADER || authHeader === `Bearer ${HELIUS_AUTH_HEADER}`;
+}
+
+async function saveLastHeliusPayload(payload) {
+  try {
+    await fs.mkdir(path.resolve('data'), { recursive: true });
+    await fs.writeFile(
+      path.resolve('data', 'last-helius-payload.json'),
+      `${JSON.stringify({ receivedAt: new Date().toISOString(), payload }, null, 2)}\n`,
+      'utf8'
+    );
+    console.log('Received Helius webhook payload.');
+  } catch (error) {
+    console.error('Could not save Helius debug payload:', error.message);
   }
 }

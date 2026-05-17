@@ -20,8 +20,10 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin }) {
   return [
     `${escapeHtml(tag)} <b>$${escapeHtml(coin.symbol)} Buy!</b>`,
     '',
-    `<b>${escapeHtml(buyer)}</b> bought <b>${escapeHtml(tokens)} $${escapeHtml(coin.symbol)}</b>`,
-    `Value: <b>${escapeHtml(usdValue)}</b>${quoteAmount ? ` (${escapeHtml(quoteAmount)})` : ''}`,
+    quoteAmount ? `Spent: <b>${escapeHtml(quoteAmount)}</b>` : null,
+    `Received: <b>${escapeHtml(tokens)} $${escapeHtml(coin.symbol)}</b>`,
+    `USD value: <b>${escapeHtml(usdValue)}</b>`,
+    `Buyer: <b>${escapeHtml(buyer)}</b>`,
     event.buyerSolBalance != null ? `Buyer wallet: <b>${escapeHtml(number.format(Number(event.buyerSolBalance)))} SOL</b>` : null,
     event.marketCap ? `Market cap: <b>${escapeHtml(money.format(Number(event.marketCap)))}</b>` : null,
     event.dex ? `DEX: <b>${escapeHtml(event.dex)}</b>` : null,
