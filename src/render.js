@@ -15,7 +15,7 @@ const compact = new Intl.NumberFormat('en-US', {
 
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
-  const buyer = event.buyer ? shortWallet(event.buyer) : 'Fresh buyer';
+  const buyer = event.buyer && event.buyer !== 'DEXSCREENER_AGGREGATE' ? shortWallet(event.buyer) : null;
   const tokenAmount = Number(event.tokenAmount ?? 0);
   const tokens = number.format(tokenAmount);
   const usdValue = Number(event.usdValue ?? 0);
@@ -36,7 +36,8 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     quoteAmount ? `<b>SOL</b> ${escapeHtml(quoteAmount.replace(' SOL', ''))}${usdValue > 0 ? ` (${escapeHtml(money.format(usdValue))})` : ''}` : null,
     tokenAmount > 0 ? `<b>${escapeHtml(coin.symbol)}</b> ${escapeHtml(tokens)} (${escapeHtml(formatMultiplier(tokenAmount))})` : null,
     event.aggregateVolumeUsd ? `<b>DEX volume:</b> ${escapeHtml(money.format(Number(event.aggregateVolumeUsd)))}` : null,
-    position ? `<b>Position:</b> ${escapeHtml(position)} <i>(Wallet)</i>` : `Buyer: <b>${escapeHtml(buyer)}</b>`,
+    position ? `<b>Position:</b> ${escapeHtml(position)} <i>(Wallet)</i>` : null,
+    buyer ? `Buyer: <b>${escapeHtml(buyer)}</b>` : null,
     marketCap ? `<b>MCap:</b> ${escapeHtml(marketCap)}` : null,
     socialsLine ? `<b>Socials:</b> ${socialsLine}` : null,
     event.dex ? `<b>DEX:</b> ${escapeHtml(event.dex)}` : null,

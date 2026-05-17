@@ -11,6 +11,7 @@ import {
   addChannelToCoinByContract,
   getCoin,
   getCoinByContract,
+  getCoinsByChat,
   getPrimaryCoin,
   getTrackedChats,
   getTrendingCoins,
@@ -123,13 +124,13 @@ bot.command('chatid', async (ctx) => {
 });
 
 bot.command('chats', async (ctx) => {
-  const chats = await getTrackedChats();
-  if (chats.length === 0) {
-    await ctx.reply('No chats are tracking coins yet.');
+  const chatCoins = await getCoinsByChat(ctx.chat.id);
+  if (chatCoins.length === 0) {
+    await ctx.reply('This chat is not tracking any coins yet. Use /setcoin SYMBOL CONTRACT.');
     return;
   }
 
-  await ctx.reply(chats.map((item) => `${item.chatId} -> $${item.symbol} (${item.contract})`).join('\n'));
+  await ctx.reply(chatCoins.map((coin) => `$${coin.symbol} -> ${coin.contract}`).join('\n'));
 });
 
 bot.command('sync_helius', async (ctx) => {
@@ -285,6 +286,30 @@ app.get('/api/debug/coins', async (_req, res) => {
       enabled: coin.enabled,
       channels: coin.channels ?? []
     }))
+  });
+});
+
+app.get('/api/debug/chat/:chatId', async (req, res) => {
+  const coins = await getCoinsByChat(req.params.chatId);
+  res.json({
+    ok: true,
+    chatId: req.params.chatId,
+    coins: coins.map((coin) => ({
+      symbol: coin.symbol,
+      contract: coin.contract,
+      channels: coin.channels ?? [],
+      imageUrl: coin.imageUrl,
+      buyUrl: coin.buyUrl
+    }))
+  });
+});
+
+app.get('/api/debug/pump/:contract', async (req, res) => {
+  const meta = await getPumpFunMetadata(req.params.contract);
+  res.json({
+    ok: true,
+    contract: req.params.contract,
+    meta
   });
 });
 
@@ -1269,12 +1294,16 @@ async function setCoinForChat(ctx, args) {
     return;
   }
 
+  const tokenMeta = await getTokenMetadata(contract);
   const buyUrl = buyUrlArg || `https://pump.fun/coin/${contract}`;
   const coin = await addChannelToCoinByContract(contract, ctx.chat.id, {
     symbol,
-    name: symbol.toUpperCase(),
+    name: tokenMeta?.name || symbol.toUpperCase(),
     buyUrl,
-    website: buyUrl
+    website: tokenMeta?.website || buyUrl,
+    imageUrl: tokenMeta?.imageUrl,
+    twitter: tokenMeta?.twitter,
+    telegram: tokenMeta?.telegram
   });
   const heliusResult = await ensureHeliusTracksContract(coin.contract);
   restartBitqueryStreamSoon();
@@ -1546,13 +1575,24 @@ async function getTokenPriceUsd(contract) {
 async function getTokenMetadata(contract) {
   if (!contract) return null;
 
+  const storedCoin = await getCoinByContract(contract);
+  const storedMeta = storedCoin ? {
+    source: 'store',
+    name: storedCoin.name,
+    symbol: storedCoin.symbol,
+    imageUrl: storedCoin.imageUrl,
+    twitter: storedCoin.twitter,
+    telegram: storedCoin.telegram,
+    website: storedCoin.website
+  } : null;
+
   const pumpMeta = await getPumpFunMetadata(contract);
   if (pumpMeta?.imageUrl || pumpMeta?.bondingProgress != null) {
-    return pumpMeta;
+    return { ...storedMeta, ...pumpMeta };
   }
 
   const heliusMeta = await getHeliusAssetMetadata(contract);
-  return heliusMeta ?? pumpMeta;
+  return { ...storedMeta, ...(heliusMeta ?? pumpMeta ?? {}) };
 }
 
 async function getPumpFunMetadata(contract) {
@@ -1583,6 +1623,9 @@ async function getPumpFunMetadata(contract) {
 }
 
 function getPumpFunBondingProgress(coin) {
+  const reserveProgress = getPumpFunReserveProgress(coin);
+  if (reserveProgress != null) return reserveProgress;
+
   const directProgress = Number(
     coin.bonding_curve_progress
       ?? coin.bondingCurveProgress
@@ -1599,6 +1642,34 @@ function getPumpFunBondingProgress(coin) {
 
   if (Number.isFinite(usdMarketCap) && Number.isFinite(graduationMarketCap) && graduationMarketCap > 0) {
     return Math.min(100, (usdMarketCap / graduationMarketCap) * 100);
+  }
+
+  return null;
+}
+
+function getPumpFunReserveProgress(coin) {
+  const realTokenReserves = Number(coin.real_token_reserves ?? coin.realTokenReserves);
+  const initialRealTokenReserves = Number(
+    coin.initial_real_token_reserves
+      ?? coin.initialRealTokenReserves
+      ?? coin.token_total_supply
+      ?? coin.tokenTotalSupply
+  );
+
+  if (
+    Number.isFinite(realTokenReserves)
+    && Number.isFinite(initialRealTokenReserves)
+    && initialRealTokenReserves > 0
+  ) {
+    return Math.max(0, Math.min(100, ((initialRealTokenReserves - realTokenReserves) / initialRealTokenReserves) * 100));
+  }
+
+  const virtualSolReserves = Number(coin.virtual_sol_reserves ?? coin.virtualSolReserves);
+  const realSolReserves = Number(coin.real_sol_reserves ?? coin.realSolReserves);
+
+  if (Number.isFinite(virtualSolReserves) && Number.isFinite(realSolReserves) && virtualSolReserves > 0) {
+    const estimatedCompletionLamports = 85 * 1_000_000_000;
+    return Math.max(0, Math.min(100, (realSolReserves / estimatedCompletionLamports) * 100));
   }
 
   return null;

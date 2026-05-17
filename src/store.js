@@ -24,6 +24,12 @@ export async function getCoinByContract(contract) {
   return store.coins.find((coin) => coin.contract?.toLowerCase() === contract.toLowerCase());
 }
 
+export async function getCoinsByChat(chatId) {
+  const store = await readStore();
+  const normalizedChatId = String(chatId);
+  return store.coins.filter((coin) => (coin.channels ?? []).map(String).includes(normalizedChatId));
+}
+
 export async function getPrimaryCoin() {
   const store = await readStore();
   return store.coins.find((coin) => coin.isPrimary && coin.enabled) ?? store.coins.find((coin) => coin.enabled);
@@ -87,12 +93,23 @@ export async function addChannelToCoinByContract(contract, chatId, defaults = {}
       emoji: defaults.emoji || '[BUY]',
       website: defaults.website || '',
       buyUrl: defaults.buyUrl || `https://pump.fun/coin/${normalizedContract}`,
+      imageUrl: defaults.imageUrl || '',
+      twitter: defaults.twitter || '',
+      telegram: defaults.telegram || '',
       channels: [],
       isPrimary: false,
       enabled: true,
       adText: ''
     };
     store.coins.push(coin);
+  } else {
+    coin.symbol = (defaults.symbol || coin.symbol).toUpperCase();
+    coin.name = defaults.name || coin.name;
+    coin.website = defaults.website || coin.website;
+    coin.buyUrl = defaults.buyUrl || coin.buyUrl;
+    coin.imageUrl = defaults.imageUrl || coin.imageUrl;
+    coin.twitter = defaults.twitter || coin.twitter;
+    coin.telegram = defaults.telegram || coin.telegram;
   }
 
   const normalizedChatId = String(chatId);
