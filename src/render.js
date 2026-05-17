@@ -17,7 +17,7 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
-const SLIME_BORDER = '🟢🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟢';
+const SLIME_BORDER = '🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩';
 
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
