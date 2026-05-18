@@ -39,6 +39,9 @@ const {
   ENABLE_NATIVE_SOLANA_WATCHER = 'false',
   ENABLE_DEXSCREENER_POLLING = 'false',
   DEXSCREENER_POLL_INTERVAL_MS = 20000,
+  ENABLE_KEEP_ALIVE = 'false',
+  KEEP_ALIVE_URL,
+  KEEP_ALIVE_INTERVAL_MS = 600000,
   SOLANA_WS_URL,
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
@@ -1015,6 +1018,29 @@ function findSolSpentByOwner(meta, accountKeys, owner) {
   return 0;
 }
 
+function startKeepAlive() {
+  const targetUrl = KEEP_ALIVE_URL || (BASE_URL ? `${BASE_URL.replace(/\/$/, '')}/health` : null);
+  if (!targetUrl) {
+    console.warn('Keep-alive skipped. Set BASE_URL or KEEP_ALIVE_URL.');
+    return;
+  }
+
+  const interval = Math.max(60000, Number(KEEP_ALIVE_INTERVAL_MS) || 600000);
+  console.log(`Keep-alive enabled. Pinging ${targetUrl} every ${interval}ms.`);
+
+  pingKeepAlive(targetUrl);
+  setInterval(() => pingKeepAlive(targetUrl), interval);
+}
+
+async function pingKeepAlive(targetUrl) {
+  try {
+    const response = await fetch(targetUrl);
+    console.log(`Keep-alive ping ${targetUrl}: ${response.status}`);
+  } catch (error) {
+    console.error(`Keep-alive ping failed for ${targetUrl}:`, error.message);
+  }
+}
+
 function startDexScreenerPolling() {
   const interval = Math.max(10000, Number(DEXSCREENER_POLL_INTERVAL_MS) || 20000);
   console.log(`DEX Screener polling enabled. Checking tracked contracts every ${interval}ms.`);
@@ -1193,6 +1219,10 @@ async function main() {
 
   if (String(ENABLE_DEXSCREENER_POLLING).toLowerCase() === 'true') {
     startDexScreenerPolling();
+  }
+
+  if (String(ENABLE_KEEP_ALIVE).toLowerCase() === 'true') {
+    startKeepAlive();
   }
 }
 
