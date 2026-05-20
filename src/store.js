@@ -6,21 +6,29 @@ const DATA_PATH = path.resolve('data', 'coins.json');
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_STORE_ID = process.env.SUPABASE_STORE_ID || 'default';
+const STORE_CACHE_MS = Number(process.env.STORE_CACHE_MS ?? 1500);
+let storeCache = null;
 
 export async function readStore() {
+  if (storeCache && storeCache.expiresAt > Date.now()) {
+    return storeCache.data;
+  }
+
   if (hasSupabaseStore()) {
     const remoteStore = await readSupabaseStore();
-    if (remoteStore) return remoteStore;
+    if (remoteStore) return cacheStore(remoteStore);
 
     const localStore = await readLocalStore();
     await writeSupabaseStore(localStore);
-    return localStore;
+    return cacheStore(localStore);
   }
 
-  return readLocalStore();
+  return cacheStore(await readLocalStore());
 }
 
 export async function writeStore(store) {
+  cacheStore(store);
+
   if (hasSupabaseStore()) {
     await writeSupabaseStore(store);
     return;
@@ -47,6 +55,15 @@ async function readLocalStore() {
 async function writeLocalStore(store) {
   await fs.mkdir(path.dirname(DATA_PATH), { recursive: true });
   await fs.writeFile(DATA_PATH, `${JSON.stringify(store, null, 2)}\n`, 'utf8');
+}
+
+function cacheStore(store) {
+  storeCache = {
+    data: store,
+    expiresAt: Date.now() + Math.max(0, STORE_CACHE_MS)
+  };
+
+  return store;
 }
 
 function hasSupabaseStore() {

@@ -41,6 +41,8 @@ const {
   ENABLE_NATIVE_SOLANA_WATCHER = 'false',
   ENABLE_DEXSCREENER_POLLING = 'false',
   DEXSCREENER_POLL_INTERVAL_MS = 20000,
+  TOKEN_METADATA_CACHE_MS = 30000,
+  ADMIN_STATUS_CACHE_MS = 300000,
   ENABLE_KEEP_ALIVE = 'false',
   KEEP_ALIVE_URL,
   KEEP_ALIVE_INTERVAL_MS = 600000,
@@ -82,6 +84,8 @@ let nativeSolanaSubscriptionIds = [];
 let telegramBackupChatId = TELEGRAM_BACKUP_CHAT_ID || '';
 const nativeSolanaSeenSignatures = new Set();
 const dexScreenerState = new Map();
+const tokenMetadataCache = new Map();
+const adminStatusCache = new Map();
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
 app.use(bot.webhookCallback(telegramWebhookPath));
@@ -206,6 +210,7 @@ bot.on('my_chat_member', async (ctx) => {
   const update = ctx.update.my_chat_member;
   const chat = update.chat;
   const status = update.new_chat_member.status;
+  adminStatusCache.delete(String(chat.id));
 
   if (['member', 'administrator'].includes(status)) {
     console.log(`Bot was added to chat ${chat.id} (${chat.title ?? chat.username ?? chat.type}). Use /setcoin SYMBOL CONTRACT in that chat to enable buy alerts.`);
@@ -690,7 +695,7 @@ async function notifyHeliusDebug(payload, result) {
 }
 
 function startHeliusPolling() {
-  const interval = Math.max(5000, Number(HELIUS_POLL_INTERVAL_MS) || 15000);
+  const interval = Math.max(2000, Number(HELIUS_POLL_INTERVAL_MS) || 15000);
   console.log(`Helius polling enabled. Scanning tracked contracts every ${interval}ms.`);
 
   pollTrackedContractsOnce().catch((error) => {
@@ -1167,7 +1172,7 @@ async function pingKeepAlive(targetUrl) {
 }
 
 function startDexScreenerPolling() {
-  const interval = Math.max(10000, Number(DEXSCREENER_POLL_INTERVAL_MS) || 20000);
+  const interval = Math.max(5000, Number(DEXSCREENER_POLL_INTERVAL_MS) || 20000);
   console.log(`DEX Screener polling enabled. Checking tracked contracts every ${interval}ms.`);
 
   pollDexScreenerOnce().catch((error) => {
@@ -2216,10 +2221,17 @@ async function postBuyAlert({ coin, eventInput }) {
     return { duplicate: true, results: [], channels: [] };
   }
 
-  const trending = await getTrendingCoins(Number(TRENDING_LIMIT));
-  const primaryCoin = await getPrimaryCoin();
-  const tokenMeta = await getTokenMetadata(coin.contract);
-  const channels = await getEligibleAlertChannels(coin);
+  const [
+    trending,
+    primaryCoin,
+    tokenMeta,
+    channels
+  ] = await Promise.all([
+    getTrendingCoins(Number(TRENDING_LIMIT)),
+    getPrimaryCoin(),
+    getCachedTokenMetadata(coin.contract),
+    getEligibleAlertChannels(coin)
+  ]);
 
   const results = await Promise.allSettled(
     channels.map((chatId) => {
@@ -2290,11 +2302,26 @@ async function getEligibleAlertChannels(coin) {
 }
 
 async function isBotAdminInChat(chatId) {
+  const normalizedChatId = String(chatId);
+  const cached = adminStatusCache.get(normalizedChatId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.isAdmin;
+  }
+
   try {
     const member = await bot.telegram.getChatMember(chatId, botId ?? bot.botInfo?.id);
-    return ['administrator', 'creator'].includes(member.status);
+    const isAdmin = ['administrator', 'creator'].includes(member.status);
+    adminStatusCache.set(normalizedChatId, {
+      isAdmin,
+      expiresAt: Date.now() + Math.max(0, Number(ADMIN_STATUS_CACHE_MS) || 300000)
+    });
+    return isAdmin;
   } catch (error) {
     console.error(`Skipping buy alert for chat ${chatId}; bot admin check failed:`, error.message);
+    adminStatusCache.set(normalizedChatId, {
+      isAdmin: false,
+      expiresAt: Date.now() + 30000
+    });
     return false;
   }
 }
@@ -2470,6 +2497,44 @@ async function getTokenMetadata(contract) {
 
   const heliusMeta = await getHeliusAssetMetadata(contract);
   return { ...storedMeta, ...(heliusMeta ?? pumpMeta ?? {}) };
+}
+
+async function getCachedTokenMetadata(contract) {
+  if (!contract) return null;
+
+  const normalizedContract = contract.toLowerCase();
+  const ttl = Math.max(0, Number(TOKEN_METADATA_CACHE_MS) || 30000);
+  const cached = tokenMetadataCache.get(normalizedContract);
+
+  if (ttl > 0 && cached?.value && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  if (ttl > 0 && cached?.promise) {
+    return cached.promise;
+  }
+
+  const promise = getTokenMetadata(contract)
+    .then((value) => {
+      tokenMetadataCache.set(normalizedContract, {
+        value,
+        expiresAt: Date.now() + ttl
+      });
+      return value;
+    })
+    .catch((error) => {
+      tokenMetadataCache.delete(normalizedContract);
+      throw error;
+    });
+
+  if (ttl > 0) {
+    tokenMetadataCache.set(normalizedContract, {
+      promise,
+      expiresAt: Date.now() + ttl
+    });
+  }
+
+  return promise;
 }
 
 async function getPumpFunMetadata(contract) {
