@@ -53,7 +53,8 @@ const {
   ALERT_CHAT_ID,
   SOLANA_RPC_HTTP = 'https://api.mainnet-beta.solana.com',
   DEFAULT_QUOTE_SYMBOL = 'SOL',
-  TRENDING_LIMIT = 5
+  TRENDING_LIMIT = 5,
+  MIN_BUY_SOL = 0.0001
 } = process.env;
 
 if (!BOT_TOKEN) {
@@ -86,6 +87,7 @@ const nativeSolanaSeenSignatures = new Set();
 const dexScreenerState = new Map();
 const tokenMetadataCache = new Map();
 const adminStatusCache = new Map();
+const minBuySol = Math.max(0, Number(MIN_BUY_SOL) || 0.0001);
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
 app.use(bot.webhookCallback(telegramWebhookPath));
@@ -1069,6 +1071,7 @@ function getPumpBondingCurvePda(mint) {
 
 async function handleNativeSolanaLogs(logs, info) {
   if (logs.err || !logs.signature) return;
+  if (!nativeLogsLookLikeSwap(logs.logs ?? [])) return;
   if (nativeSolanaSeenSignatures.has(logs.signature)) return;
   nativeSolanaSeenSignatures.add(logs.signature);
 
@@ -1092,15 +1095,23 @@ async function handleNativeSolanaLogs(logs, info) {
   await postBuyAlert({ coin, eventInput });
 }
 
+function nativeLogsLookLikeSwap(logLines) {
+  return logLines.some((line) => {
+    const text = String(line);
+    return /Instruction:\s*(Buy|Swap|SwapV2|Route)/i.test(text)
+      || /\b(Pump|Raydium|Jupiter|Meteora|Orca)\b/i.test(text);
+  });
+}
+
 function parseNativeSolanaBuy(transaction, contract, signature) {
   const meta = transaction.meta;
   const accountKeys = transaction.transaction.message.accountKeys.map((key) => key.pubkey.toBase58());
-  const tokenGain = findLargestTokenGain(meta, contract);
+  const buyer = accountKeys[0];
+  const tokenGain = findTokenGainForOwner(meta, contract, buyer);
   if (!tokenGain || tokenGain.amount <= 0) return null;
 
-  const buyer = tokenGain.owner || accountKeys[0];
   const solSpent = findSolSpentByOwner(meta, accountKeys, buyer);
-  if (solSpent <= 0) return null;
+  if (solSpent < minBuySol) return null;
 
   return {
     contract,
@@ -1116,11 +1127,23 @@ function parseNativeSolanaBuy(transaction, contract, signature) {
   };
 }
 
+function findTokenGainForOwner(meta, contract, owner) {
+  return findTokenGains(meta, contract)
+    .filter((gain) => gain.owner === owner)
+    .sort((a, b) => b.amount - a.amount)[0] ?? null;
+}
+
 function findLargestTokenGain(meta, contract) {
+  return findTokenGains(meta, contract)
+    .sort((a, b) => b.amount - a.amount)[0] ?? null;
+}
+
+function findTokenGains(meta, contract) {
   const pre = new Map((meta.preTokenBalances ?? [])
     .filter((balance) => balance.mint === contract)
     .map((balance) => [tokenBalanceKey(balance), uiTokenAmount(balance)]));
-  const gains = (meta.postTokenBalances ?? [])
+
+  return (meta.postTokenBalances ?? [])
     .filter((balance) => balance.mint === contract)
     .map((balance) => {
       const before = pre.get(tokenBalanceKey(balance)) ?? 0;
@@ -1130,10 +1153,7 @@ function findLargestTokenGain(meta, contract) {
         amount: uiTokenAmount(balance) - before
       };
     })
-    .filter((gain) => gain.amount > 0)
-    .sort((a, b) => b.amount - a.amount);
-
-  return gains[0];
+    .filter((gain) => gain.amount > 0);
 }
 
 function tokenBalanceKey(balance) {
@@ -2359,21 +2379,29 @@ async function parseHeliusTransaction(transaction) {
   const nativeTransfers = transaction.nativeTransfers ?? [];
   const signature = transaction.signature;
   const source = transaction.source ?? transaction.type ?? 'helius';
+  const feePayer = transaction.feePayer;
+  const hasSwapContext = isLikelySwapBuy(transaction);
   const events = [];
 
   for (const transfer of tokenTransfers) {
     const contract = transfer.mint;
     if (!contract) continue;
 
-    const buyer = transfer.toUserAccount ?? transfer.userAccount ?? transaction.feePayer;
+    const buyer = transfer.toUserAccount ?? transfer.userAccount ?? feePayer;
     if (!buyer) continue;
 
-    if (transfer.sourceType === 'token-transfer' && transaction.feePayer && buyer !== transaction.feePayer) {
+    if (feePayer && buyer !== feePayer) {
       continue;
     }
 
-    const solSpent = getSolSpentByWallet(transaction, nativeTransfers, buyer);
-    if (solSpent <= 0) continue;
+    if (!hasSwapContext && transfer.sourceType !== 'swap-output') {
+      continue;
+    }
+
+    const solSpent = getSolSpentByWallet(transaction, nativeTransfers, buyer, {
+      allowBalanceChangeFallback: hasSwapContext
+    });
+    if (solSpent < minBuySol) continue;
 
     const buyerSolBalance = await getSolBalance(buyer);
     const priceUsd = await getTokenPriceUsd(contract);
@@ -2465,7 +2493,7 @@ function parseRawTokenAmount(rawTokenAmount) {
   return amount / 10 ** decimals;
 }
 
-function getSolSpentByWallet(transaction, nativeTransfers, wallet) {
+function getSolSpentByWallet(transaction, nativeTransfers, wallet, options = {}) {
   const lamportsSpent = nativeTransfers
     .filter((nativeTransfer) => nativeTransfer.fromUserAccount === wallet)
     .reduce((total, nativeTransfer) => total + Number(nativeTransfer.amount ?? 0), 0);
@@ -2482,11 +2510,16 @@ function getSolSpentByWallet(transaction, nativeTransfers, wallet) {
     }
   }
 
+  if (!options.allowBalanceChangeFallback) {
+    return 0;
+  }
+
   const balanceChange = (transaction.accountData ?? [])
     .filter((account) => account.account === wallet && Number(account.nativeBalanceChange ?? 0) < 0)
     .reduce((total, account) => total + Math.abs(Number(account.nativeBalanceChange ?? 0)), 0);
 
-  return balanceChange / 1_000_000_000;
+  const solChange = balanceChange / 1_000_000_000;
+  return solChange >= minBuySol ? solChange : 0;
 }
 
 async function getTokenPriceUsd(contract) {
