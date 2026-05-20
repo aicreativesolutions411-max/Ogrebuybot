@@ -3,15 +3,96 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const DATA_PATH = path.resolve('data', 'coins.json');
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_STORE_ID = process.env.SUPABASE_STORE_ID || 'default';
 
 export async function readStore() {
+  if (hasSupabaseStore()) {
+    const remoteStore = await readSupabaseStore();
+    if (remoteStore) return remoteStore;
+
+    const localStore = await readLocalStore();
+    await writeSupabaseStore(localStore);
+    return localStore;
+  }
+
+  return readLocalStore();
+}
+
+export async function writeStore(store) {
+  if (hasSupabaseStore()) {
+    await writeSupabaseStore(store);
+    return;
+  }
+
+  await writeLocalStore(store);
+}
+
+export async function replaceStore(store) {
+  const normalized = {
+    coins: Array.isArray(store.coins) ? store.coins : [],
+    events: Array.isArray(store.events) ? store.events : []
+  };
+
+  await writeStore(normalized);
+  return normalized;
+}
+
+async function readLocalStore() {
   const raw = await fs.readFile(DATA_PATH, 'utf8');
   return JSON.parse(raw);
 }
 
-export async function writeStore(store) {
+async function writeLocalStore(store) {
   await fs.mkdir(path.dirname(DATA_PATH), { recursive: true });
   await fs.writeFile(DATA_PATH, `${JSON.stringify(store, null, 2)}\n`, 'utf8');
+}
+
+function hasSupabaseStore() {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+}
+
+function supabaseHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    'Content-Type': 'application/json',
+    ...extra
+  };
+}
+
+async function readSupabaseStore() {
+  const url = `${SUPABASE_URL}/rest/v1/bot_store?id=eq.${encodeURIComponent(SUPABASE_STORE_ID)}&select=data`;
+  const response = await fetch(url, {
+    headers: supabaseHeaders()
+  });
+
+  if (!response.ok) {
+    throw new Error(`Supabase read failed: ${response.status} ${await response.text()}`);
+  }
+
+  const rows = await response.json();
+  return rows[0]?.data ?? null;
+}
+
+async function writeSupabaseStore(store) {
+  const url = `${SUPABASE_URL}/rest/v1/bot_store`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: supabaseHeaders({
+      Prefer: 'resolution=merge-duplicates,return=minimal'
+    }),
+    body: JSON.stringify({
+      id: SUPABASE_STORE_ID,
+      data: store,
+      updated_at: new Date().toISOString()
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Supabase write failed: ${response.status} ${await response.text()}`);
+  }
 }
 
 export async function getCoin(symbol) {

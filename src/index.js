@@ -15,6 +15,7 @@ import {
   getPrimaryCoin,
   getTrackedChats,
   getTrendingCoins,
+  replaceStore,
   readStore,
   recordBuyEvent,
   upsertCoin
@@ -42,6 +43,7 @@ const {
   ENABLE_KEEP_ALIVE = 'false',
   KEEP_ALIVE_URL,
   KEEP_ALIVE_INTERVAL_MS = 600000,
+  TELEGRAM_BACKUP_CHAT_ID,
   SOLANA_WS_URL,
   TELEGRAM_WEBHOOK_URL,
   BASE_URL,
@@ -66,6 +68,7 @@ let pumpPortalSocket = null;
 let pumpPortalRestartTimer = null;
 let nativeSolanaConnection = null;
 let nativeSolanaSubscriptionIds = [];
+let telegramBackupChatId = TELEGRAM_BACKUP_CHAT_ID || '';
 const nativeSolanaSeenSignatures = new Set();
 const dexScreenerState = new Map();
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
@@ -101,6 +104,9 @@ async function showHelp(ctx) {
     '/trending - show 24h trending volume',
     '/chatid - show this Telegram chat id',
     '/chats - show tracked chats',
+    '/backup_here - use this chat/channel for backups',
+    '/backup_now - post a backup to the backup chat',
+    '/restore_backup - reply to a backup message to restore',
     '/track OGRE - add this chat/channel to a coin',
     '/setcoin SYMBOL CONTRACT - register this chat for a coin',
     '/setca SYMBOL CONTRACT - same as /setcoin',
@@ -146,6 +152,28 @@ bot.command('sync_helius', async (ctx) => {
   await ctx.reply(renderHeliusSyncStatus(heliusResult) || 'Helius sync did not run. Check env vars.');
 });
 
+bot.command('backup_here', async (ctx) => {
+  telegramBackupChatId = String(ctx.chat.id);
+  await sendTelegramBackup('Backup channel set from /backup_here.');
+  await ctx.reply('This chat is now the Telegram backup channel. Backups will post here after setup changes.');
+});
+
+bot.command('backup_now', async (ctx) => {
+  if (!telegramBackupChatId) telegramBackupChatId = String(ctx.chat.id);
+  await sendTelegramBackup('Manual backup from /backup_now.');
+  await ctx.reply('Backup posted.');
+});
+
+bot.command('restore_backup', async (ctx) => {
+  const restored = await restoreTelegramBackupFromReply(ctx);
+  if (restored) {
+    await ctx.reply(`Restored backup: ${restored.coins.length} coins, ${restored.events.length} events.`);
+    restartBitqueryStreamSoon();
+    restartPumpPortalStreamSoon();
+    restartNativeSolanaWatcherSoon();
+  }
+});
+
 bot.command('scan_now', async (ctx) => {
   const result = await pollTrackedContractsOnce();
   await ctx.reply([
@@ -180,6 +208,7 @@ bot.command('track', async (ctx) => {
       `This chat is now tracking $${coin.symbol}. Make sure the bot is admin if this is a channel.`,
       renderHeliusSyncStatus(heliusResult)
     ].filter(Boolean).join('\n'));
+    await sendTelegramBackup(`Tracked $${coin.symbol} in chat ${ctx.chat.id}.`);
   } catch (error) {
     await ctx.reply(error.message);
   }
@@ -210,6 +239,7 @@ bot.command(['setcoin', 'setca'], async (ctx) => {
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
     renderHeliusSyncStatus(heliusResult)
   ].filter(Boolean).join('\n'));
+  await sendTelegramBackup(`Set ${coin.symbol} ${coin.contract} for chat ${ctx.chat.id}.`);
 });
 
 bot.command('testbuy', async (ctx) => {
@@ -266,10 +296,14 @@ bot.command('addcoin', async (ctx) => {
     `Added $${coin.symbol} and linked it to this chat.`,
     renderHeliusSyncStatus(heliusResult)
   ].filter(Boolean).join('\n'));
+  await sendTelegramBackup(`Added ${coin.symbol} ${coin.contract} for chat ${ctx.chat.id}.`);
 });
 
 bot.on('channel_post', handleFallbackCommand);
 bot.on('message', handleFallbackCommand);
+bot.on('edited_message', handleFallbackCommand);
+bot.on('edited_channel_post', handleFallbackCommand);
+bot.on('callback_query', async (ctx) => ctx.answerCbQuery().catch(() => {}));
 
 app.get('/', (_req, res) => {
   res.send('OGRE buy bot is running.');
@@ -325,6 +359,25 @@ app.get('/api/telegram/info', async (_req, res) => {
   });
 });
 
+app.post('/api/debug/telegram-update', async (req, res) => {
+  await fs.mkdir(path.resolve('data'), { recursive: true });
+  await fs.writeFile(
+    path.resolve('data', 'last-telegram-update.json'),
+    `${JSON.stringify({ receivedAt: new Date().toISOString(), update: req.body }, null, 2)}\n`,
+    'utf8'
+  );
+  res.json({ ok: true });
+});
+
+app.get('/api/debug/telegram-last', async (_req, res) => {
+  try {
+    const raw = await fs.readFile(path.resolve('data', 'last-telegram-update.json'), 'utf8');
+    res.type('json').send(raw);
+  } catch {
+    res.status(404).json({ error: 'No debug Telegram update stored.' });
+  }
+});
+
 app.get('/api/telegram/reset-webhook', async (req, res) => {
   if (WEBHOOK_SECRET && req.query.secret !== WEBHOOK_SECRET) {
     res.status(401).json({ error: 'Invalid secret' });
@@ -337,8 +390,7 @@ app.get('/api/telegram/reset-webhook', async (req, res) => {
   }
 
   await bot.telegram.setWebhook(telegramWebhookUrl, {
-    drop_pending_updates: true,
-    allowed_updates: ['message', 'channel_post', 'my_chat_member']
+    drop_pending_updates: true
   });
   const webhookInfo = await bot.telegram.getWebhookInfo();
 
@@ -1170,6 +1222,9 @@ async function main() {
     { command: 'trending', description: 'Show 24h trending volume' },
     { command: 'chatid', description: 'Show this chat id' },
     { command: 'chats', description: 'Show tracked chats' },
+    { command: 'backup_here', description: 'Use this chat for backups' },
+    { command: 'backup_now', description: 'Post a backup now' },
+    { command: 'restore_backup', description: 'Restore from replied backup' },
     { command: 'sync_helius', description: 'Sync tracked CAs to Helius' },
     { command: 'scan_now', description: 'Scan tracked CAs for recent buys' },
     { command: 'track', description: 'Track a coin in this chat' },
@@ -1181,8 +1236,7 @@ async function main() {
 
   if (telegramWebhookUrl) {
     await bot.telegram.setWebhook(telegramWebhookUrl, {
-      drop_pending_updates: true,
-      allowed_updates: ['message', 'channel_post', 'my_chat_member']
+      drop_pending_updates: true
     });
     console.log(`Telegram webhook set to ${telegramWebhookUrl}`);
   } else {
@@ -1243,8 +1297,12 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
 function getUpdateText(ctx) {
   return ctx.message?.text
     ?? ctx.message?.caption
+    ?? ctx.editedMessage?.text
+    ?? ctx.editedMessage?.caption
     ?? ctx.channelPost?.text
     ?? ctx.channelPost?.caption
+    ?? ctx.editedChannelPost?.text
+    ?? ctx.editedChannelPost?.caption
     ?? '';
 }
 
@@ -1266,6 +1324,31 @@ async function handleFallbackCommand(ctx) {
 
   if (command === 'chats') {
     await replyWithTrackedChats(ctx);
+    return;
+  }
+
+  if (command === 'backup_here') {
+    telegramBackupChatId = String(ctx.chat.id);
+    await sendTelegramBackup('Backup channel set from /backup_here.');
+    await ctx.reply('This chat is now the Telegram backup channel. Backups will post here after setup changes.');
+    return;
+  }
+
+  if (command === 'backup_now') {
+    if (!telegramBackupChatId) telegramBackupChatId = String(ctx.chat.id);
+    await sendTelegramBackup('Manual backup from /backup_now.');
+    await ctx.reply('Backup posted.');
+    return;
+  }
+
+  if (command === 'restore_backup') {
+    const restored = await restoreTelegramBackupFromReply(ctx);
+    if (restored) {
+      await ctx.reply(`Restored backup: ${restored.coins.length} coins, ${restored.events.length} events.`);
+      restartBitqueryStreamSoon();
+      restartPumpPortalStreamSoon();
+      restartNativeSolanaWatcherSoon();
+    }
     return;
   }
 
@@ -1344,6 +1427,7 @@ async function setCoinForChat(ctx, args) {
     `This chat is now tracking $${coin.symbol} buys for ${coin.contract}.`,
     renderHeliusSyncStatus(heliusResult)
   ].filter(Boolean).join('\n'));
+  await sendTelegramBackup(`Set ${coin.symbol} ${coin.contract} for chat ${ctx.chat.id}.`);
 }
 
 async function trackSymbolForChat(ctx, symbol) {
@@ -1359,6 +1443,7 @@ async function trackSymbolForChat(ctx, symbol) {
       `This chat is now tracking $${coin.symbol}. Make sure the bot is admin if this is a channel.`,
       renderHeliusSyncStatus(heliusResult)
     ].filter(Boolean).join('\n'));
+    await sendTelegramBackup(`Tracked $${coin.symbol} in chat ${ctx.chat.id}.`);
   } catch (error) {
     await ctx.reply(error.message);
   }
@@ -1388,6 +1473,75 @@ async function sendTestBuy(ctx, symbol) {
   });
 
   await ctx.reply(`Sent a test buy alert for $${coin.symbol}.`);
+}
+
+async function sendTelegramBackup(reason = 'Backup') {
+  if (!telegramBackupChatId) return;
+
+  try {
+    const store = await readStore();
+    const backup = {
+      type: 'OgreBuyBotBackup',
+      version: 1,
+      createdAt: new Date().toISOString(),
+      reason,
+      store
+    };
+
+    await bot.telegram.sendMessage(
+      telegramBackupChatId,
+      [
+        '<b>OgreBuyBot Backup</b>',
+        escapeHtmlForTelegram(reason),
+        '<pre>',
+        escapeHtmlForTelegram(JSON.stringify(backup)),
+        '</pre>'
+      ].join('\n'),
+      { parse_mode: 'HTML' }
+    );
+  } catch (error) {
+    console.error('Telegram backup failed:', error.message);
+  }
+}
+
+async function restoreTelegramBackupFromReply(ctx) {
+  const replyText = ctx.message?.reply_to_message?.text
+    ?? ctx.message?.reply_to_message?.caption
+    ?? ctx.editedMessage?.reply_to_message?.text
+    ?? ctx.editedMessage?.reply_to_message?.caption
+    ?? ctx.channelPost?.reply_to_message?.text
+    ?? ctx.channelPost?.reply_to_message?.caption
+    ?? ctx.editedChannelPost?.reply_to_message?.text
+    ?? ctx.editedChannelPost?.reply_to_message?.caption
+    ?? '';
+
+  const backup = parseTelegramBackup(replyText);
+  if (!backup?.store) {
+    await ctx.reply('Reply to an OgreBuyBot backup message, then run /restore_backup.');
+    return null;
+  }
+
+  return replaceStore(backup.store);
+}
+
+function parseTelegramBackup(text) {
+  const trimmed = String(text ?? '').trim();
+  const jsonMatch = trimmed.match(/\{[\s\S]*\}$/);
+  if (!jsonMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.type === 'OgreBuyBotBackup' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function escapeHtmlForTelegram(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }
 
 async function postBuyAlert({ coin, eventInput }) {

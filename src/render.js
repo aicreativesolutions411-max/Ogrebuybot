@@ -17,9 +17,8 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
-const SLIME_BORDER = '🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩';
-
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
+  const theme = getCoinTheme(coin, tokenMeta);
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
   const buyer = event.buyer && event.buyer !== 'DEXSCREENER_AGGREGATE' ? shortWallet(event.buyer) : null;
   const tokenAmount = Number(event.tokenAmount ?? 0);
@@ -31,12 +30,15 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
   const txLine = event.txUrl ? `<a href="${escapeHtml(event.txUrl)}">Chart</a>` : null;
   const buyLine = coin.buyUrl ? `<a href="${escapeHtml(coin.buyUrl)}">Buy</a>` : null;
   const socialsLine = renderSocials(coin, tokenMeta);
+  const bondingLine = renderBondingProcess(tokenMeta, theme);
 
   return [
-    SLIME_BORDER,
+    theme.border,
     `<b>NEW | ${escapeHtml(tokenName)} BUY!</b>`,
     'by @OgreBuyBot',
     '',
+    bondingLine,
+    bondingLine ? '' : null,
     event.aggregateBuys ? `<b>New Buy:</b> ${escapeHtml(event.aggregateBuys)} buy${event.aggregateBuys === 1 ? '' : 's'}` : null,
     quoteAmount ? `<b>SOL</b> ${escapeHtml(quoteAmount.replace(' SOL', ''))}${usdValue > 0 ? ` (${escapeHtml(money.format(usdValue))})` : ''}` : null,
     tokenAmount > 0 ? `<b>${formatTicker(coin.symbol)}</b> ${escapeHtml(tokens)} (${escapeHtml(formatMultiplier(tokenAmount))})` : null,
@@ -51,8 +53,89 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     [txLine, buyLine].filter(Boolean).join(' | '),
     renderAdBlock({ trending, primaryCoin }),
     renderOgreFooter(),
-    SLIME_BORDER
+    theme.border
   ].filter(Boolean).join('\n');
+}
+
+function renderBondingProcess(tokenMeta, theme) {
+  const rawProgress = tokenMeta?.bondingProgress;
+
+  if (rawProgress == null || tokenMeta?.complete === true) {
+    return null;
+  }
+
+  const progress = clamp(Number(rawProgress), 0, 100);
+  if (!Number.isFinite(progress) || progress >= 100) {
+    return null;
+  }
+
+  const totalSlots = 8;
+  const filledSlots = clamp(Math.round((progress / 100) * totalSlots), 0, totalSlots);
+  const emptySlots = totalSlots - filledSlots;
+
+  return [
+    `<b>${number.format(progress)}% Bonding Process</b>`,
+    `${theme.filled.repeat(filledSlots)}${theme.empty.repeat(emptySlots)}`
+  ].join('\n');
+}
+
+function getCoinTheme(coin, tokenMeta) {
+  const text = `${coin?.symbol ?? ''} ${coin?.name ?? ''} ${tokenMeta?.name ?? ''}`.toLowerCase();
+  const has = (...words) => words.some((word) => text.includes(word));
+
+  if (has('ogre')) {
+    return {
+      border: '🧌 🟢 🧪 🫧 🧌',
+      filled: '🟢',
+      empty: '⚫'
+    };
+  }
+
+  if (has('pepe', 'frog', 'toad')) {
+    return {
+      border: '🐸 🟢 ✨ 🟢 🐸',
+      filled: '🐸',
+      empty: '⚫'
+    };
+  }
+
+  if (has('doge', 'dog', 'bonk', 'shib', 'inu')) {
+    return {
+      border: '🐶 💥 🦴 💥 🐶',
+      filled: '🦴',
+      empty: '⚫'
+    };
+  }
+
+  if (has('cat', 'mew', 'kitty')) {
+    return {
+      border: '🐱 ✨ 🐾 ✨ 🐱',
+      filled: '🐾',
+      empty: '⚫'
+    };
+  }
+
+  if (has('dragon', 'drake')) {
+    return {
+      border: '🐉 🔥 ✨ 🔥 🐉',
+      filled: '🔥',
+      empty: '⚫'
+    };
+  }
+
+  if (has('moon', 'rocket', 'mars')) {
+    return {
+      border: '🚀 🌕 ✨ 🌕 🚀',
+      filled: '🚀',
+      empty: '⚫'
+    };
+  }
+
+  return {
+    border: '✨ 🟢 💫 🟢 ✨',
+    filled: '🟢',
+    empty: '⚫'
+  };
 }
 
 function renderDexPaidLine(dex) {
@@ -153,6 +236,10 @@ function formatMultiplier(amount) {
 function formatSigned(value) {
   if (!Number.isFinite(value)) return '0';
   return value > 0 ? `+${number.format(value)}` : number.format(value);
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function escapeHtml(value) {
