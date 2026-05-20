@@ -31,11 +31,13 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta, 
   const buyLine = coin.buyUrl ? `<a href="${escapeHtml(coin.buyUrl)}">Buy</a>` : null;
   const socialsLine = chatSettings.showSocials === false ? null : renderSocials(coin, tokenMeta);
   const bondingLine = chatSettings.showBonding === false ? null : renderBondingProcess(tokenMeta, theme);
+  const buyEmojiLines = renderBuyEmojiLines(event, chatSettings);
 
   return [
     theme.border,
     `<b>NEW | ${escapeHtml(tokenName)} BUY!</b>`,
     'by @OgreBuyBot',
+    buyEmojiLines,
     '',
     bondingLine,
     bondingLine ? '' : null,
@@ -55,6 +57,18 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta, 
     chatSettings.showFooter === false ? null : renderOgreFooter(),
     theme.border
   ].filter(Boolean).join('\n');
+}
+
+function renderBuyEmojiLines(event, chatSettings) {
+  const buyEmoji = chatSettings.buyEmoji;
+  if (!buyEmoji?.line || !buyEmoji.baseSol) return null;
+
+  const quoteAmount = Number(event.quoteAmount ?? 0);
+  const baseSol = Number(buyEmoji.baseSol);
+  if (!Number.isFinite(quoteAmount) || !Number.isFinite(baseSol) || quoteAmount <= 0 || baseSol <= 0) return null;
+
+  const lines = Math.max(1, Math.min(12, Math.floor(quoteAmount / baseSol)));
+  return Array.from({ length: lines }, () => buyEmoji.line).join('\n');
 }
 
 function renderBondingProcess(tokenMeta, theme) {
