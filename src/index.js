@@ -3,7 +3,7 @@ import express from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { Telegraf } from 'telegraf';
+import { Markup, Telegraf } from 'telegraf';
 import WebSocket from 'ws';
 import { z } from 'zod';
 import {
@@ -18,6 +18,7 @@ import {
   replaceStore,
   readStore,
   recordBuyEvent,
+  updateCoinChatSettings,
   upsertCoin
 } from './store.js';
 import { renderBuyAlert, renderCoinList, renderTrendingList } from './render.js';
@@ -62,6 +63,7 @@ const app = express();
 const telegramWebhookPath = `/telegram/${BOT_TOKEN}`;
 const telegramWebhookUrl = TELEGRAM_WEBHOOK_URL ?? (BASE_URL ? `${BASE_URL.replace(/\/$/, '')}${telegramWebhookPath}` : null);
 let botUsername = '';
+let botId = null;
 let bitquerySocket = null;
 let bitqueryRestartTimer = null;
 let pumpPortalSocket = null;
@@ -110,6 +112,11 @@ async function showHelp(ctx) {
     '/track OGRE - add this chat/channel to a coin',
     '/setcoin SYMBOL CONTRACT - register this chat for a coin',
     '/setca SYMBOL CONTRACT - same as /setcoin',
+    '/setmedia SYMBOL - reply to a photo/video or paste a media URL',
+    '/clearmedia SYMBOL - use token metadata image again',
+    '/setemoji SYMBOL emojis - customize alert emojis',
+    '/buysettings SYMBOL topmovers|footer|bonding|socials on|off',
+    '/settings - show this chat buy settings',
     '/testbuy OGRE - send a test buy alert',
     '/addcoin SYMBOL Name | chain | contract | buyUrl - register a coin',
     '',
@@ -240,6 +247,26 @@ bot.command(['setcoin', 'setca'], async (ctx) => {
     renderHeliusSyncStatus(heliusResult)
   ].filter(Boolean).join('\n'));
   await sendTelegramBackup(`Set ${coin.symbol} ${coin.contract} for chat ${ctx.chat.id}.`);
+});
+
+bot.command('setmedia', async (ctx) => {
+  await setMediaForChat(ctx, getUpdateText(ctx).split(/\s+/).slice(1));
+});
+
+bot.command('clearmedia', async (ctx) => {
+  await clearMediaForChat(ctx, getUpdateText(ctx).split(/\s+/).slice(1));
+});
+
+bot.command('setemoji', async (ctx) => {
+  await setEmojiForChat(ctx, getUpdateText(ctx).split(/\s+/).slice(1));
+});
+
+bot.command('buysettings', async (ctx) => {
+  await setBuySettingsForChat(ctx, getUpdateText(ctx).split(/\s+/).slice(1));
+});
+
+bot.command('settings', async (ctx) => {
+  await replyWithBuySettings(ctx);
 });
 
 bot.command('testbuy', async (ctx) => {
@@ -413,7 +440,7 @@ app.get('/api/test-alert/:symbol', async (req, res) => {
     return;
   }
 
-  const { event, results, duplicate } = await postBuyAlert({
+  const { event, results, duplicate, channels } = await postBuyAlert({
     coin,
     eventInput: {
       symbol: coin.symbol,
@@ -432,10 +459,10 @@ app.get('/api/test-alert/:symbol', async (req, res) => {
   res.json({
     ok: true,
     duplicate: Boolean(duplicate),
-    channels: coin.channels ?? [],
+    channels,
     sent: results.filter((result) => result.status === 'fulfilled').length,
     failed: results
-      .map((result, index) => ({ result, chatId: coin.channels?.[index] }))
+      .map((result, index) => ({ result, chatId: channels[index] }))
       .filter((item) => item.result.status === 'rejected')
       .map((item) => ({
         chatId: item.chatId,
@@ -457,7 +484,7 @@ app.get('/api/test-alert-contract/:contract', async (req, res) => {
     return;
   }
 
-  const { event, results, duplicate } = await postBuyAlert({
+  const { event, results, duplicate, channels } = await postBuyAlert({
     coin,
     eventInput: {
       symbol: coin.symbol,
@@ -476,10 +503,10 @@ app.get('/api/test-alert-contract/:contract', async (req, res) => {
   res.json({
     ok: true,
     duplicate: Boolean(duplicate),
-    channels: getAlertChannels(coin),
+    channels,
     sent: results.filter((result) => result.status === 'fulfilled').length,
     failed: results
-      .map((result, index) => ({ result, chatId: getAlertChannels(coin)[index] }))
+      .map((result, index) => ({ result, chatId: channels[index] }))
       .filter((item) => item.result.status === 'rejected')
       .map((item) => ({
         chatId: item.chatId,
@@ -510,10 +537,11 @@ app.post('/api/buy', async (req, res) => {
     return;
   }
 
-  const { event, results } = await postBuyAlert({ coin, eventInput: parsed.data });
+  const { event, results, channels } = await postBuyAlert({ coin, eventInput: parsed.data });
 
   res.json({
     ok: true,
+    channels,
     sent: results.filter((result) => result.status === 'fulfilled').length,
     failed: results.filter((result) => result.status === 'rejected').length,
     event
@@ -1213,6 +1241,7 @@ async function main() {
 
   const me = await bot.telegram.getMe();
   botUsername = me.username;
+  botId = me.id;
   console.log(`Telegram bot connected as @${me.username}`);
 
   await bot.telegram.setMyCommands([
@@ -1230,6 +1259,11 @@ async function main() {
     { command: 'track', description: 'Track a coin in this chat' },
     { command: 'setcoin', description: 'Register this chat for a coin CA' },
     { command: 'setca', description: 'Register this chat for a coin CA' },
+    { command: 'setmedia', description: 'Set custom buy alert photo/video' },
+    { command: 'clearmedia', description: 'Clear custom buy alert media' },
+    { command: 'setemoji', description: 'Set custom buy alert emojis' },
+    { command: 'buysettings', description: 'Toggle buy alert sections' },
+    { command: 'settings', description: 'Show this chat buy settings' },
     { command: 'testbuy', description: 'Send a test buy alert' },
     { command: 'addcoin', description: 'Register another coin' }
   ]);
@@ -1308,7 +1342,10 @@ function getUpdateText(ctx) {
 
 async function handleFallbackCommand(ctx) {
   const parsed = parseCommandFromText(getUpdateText(ctx));
-  if (!parsed) return;
+  if (!parsed) {
+    await autoTrackContractFromChat(ctx);
+    return;
+  }
 
   const { command, args } = parsed;
 
@@ -1357,6 +1394,31 @@ async function handleFallbackCommand(ctx) {
     return;
   }
 
+  if (command === 'setmedia') {
+    await setMediaForChat(ctx, args);
+    return;
+  }
+
+  if (command === 'clearmedia') {
+    await clearMediaForChat(ctx, args);
+    return;
+  }
+
+  if (command === 'setemoji') {
+    await setEmojiForChat(ctx, args);
+    return;
+  }
+
+  if (command === 'buysettings') {
+    await setBuySettingsForChat(ctx, args);
+    return;
+  }
+
+  if (command === 'settings') {
+    await replyWithBuySettings(ctx);
+    return;
+  }
+
   if (command === 'track') {
     await trackSymbolForChat(ctx, args[0]);
     return;
@@ -1376,7 +1438,7 @@ function parseCommandFromText(rawText) {
 
   if (!text.startsWith('/')) {
     const firstWord = text.split(/\s+/)[0]?.toLowerCase();
-    const mentionOnlyCommands = new Set(['help', 'start', 'chatid', 'chats', 'setcoin', 'setca', 'track', 'testbuy']);
+    const mentionOnlyCommands = new Set(['help', 'start', 'chatid', 'chats', 'setcoin', 'setca', 'setmedia', 'clearmedia', 'setemoji', 'buysettings', 'settings', 'track', 'testbuy']);
     if (!mentionOnlyCommands.has(firstWord)) return null;
   }
 
@@ -1428,6 +1490,220 @@ async function setCoinForChat(ctx, args) {
     renderHeliusSyncStatus(heliusResult)
   ].filter(Boolean).join('\n'));
   await sendTelegramBackup(`Set ${coin.symbol} ${coin.contract} for chat ${ctx.chat.id}.`);
+}
+
+async function setMediaForChat(ctx, args) {
+  const { target, mediaUrl } = parseOptionalTargetAndValue(ctx, args);
+  const media = getAttachedMedia(ctx) ?? (mediaUrl ? mediaFromUrl(mediaUrl) : null);
+
+  if (!media) {
+    await ctx.reply('Reply to a photo/video with /setmedia SYMBOL, or use /setmedia SYMBOL https://media-url');
+    return;
+  }
+
+  const coin = await updateCoinChatSettings(ctx.chat.id, target, { media });
+  await ctx.reply(`Custom ${media.type} set for $${coin.symbol} buy alerts in this chat.`);
+  await sendTelegramBackup(`Set custom media for $${coin.symbol} in chat ${ctx.chat.id}.`);
+}
+
+async function clearMediaForChat(ctx, args) {
+  const [target] = args;
+  const coin = await updateCoinChatSettings(ctx.chat.id, target, { media: null });
+  await ctx.reply(`Custom media cleared for $${coin.symbol}. Token metadata image will be used again.`);
+  await sendTelegramBackup(`Cleared custom media for $${coin.symbol} in chat ${ctx.chat.id}.`);
+}
+
+async function setEmojiForChat(ctx, args) {
+  const { target, value } = await parseOptionalCoinTarget(ctx.chat.id, args);
+  const emojiLine = value.trim();
+
+  if (!emojiLine) {
+    await ctx.reply('Usage: /setemoji SYMBOL 🧌 🟢 🧪 🫧 🧌');
+    return;
+  }
+
+  const coin = await updateCoinChatSettings(ctx.chat.id, target, { emojiLine });
+  await ctx.reply(`Custom emojis set for $${coin.symbol} buy alerts in this chat.`);
+  await sendTelegramBackup(`Set custom emojis for $${coin.symbol} in chat ${ctx.chat.id}.`);
+}
+
+async function setBuySettingsForChat(ctx, args) {
+  const { target, key, enabled } = await parseBuySettingsArgs(ctx.chat.id, args);
+
+  if (!key || enabled == null) {
+    await ctx.reply('Usage: /buysettings SYMBOL topmovers|footer|bonding|socials on|off');
+    return;
+  }
+
+  const settingKey = {
+    topmovers: 'showTopMovers',
+    footer: 'showFooter',
+    bonding: 'showBonding',
+    socials: 'showSocials'
+  }[key];
+
+  if (!settingKey) {
+    await ctx.reply('Setting must be one of: topmovers, footer, bonding, socials.');
+    return;
+  }
+
+  const coin = await updateCoinChatSettings(ctx.chat.id, target, { [settingKey]: enabled });
+  await ctx.reply(`$${coin.symbol} ${key} is now ${enabled ? 'on' : 'off'} in this chat.`);
+  await sendTelegramBackup(`Set ${key} ${enabled ? 'on' : 'off'} for $${coin.symbol} in chat ${ctx.chat.id}.`);
+}
+
+async function replyWithBuySettings(ctx) {
+  const coins = await getCoinsByChat(ctx.chat.id);
+  if (coins.length === 0) {
+    await ctx.reply('This chat is not tracking a coin yet. Use /setcoin SYMBOL CONTRACT.');
+    return;
+  }
+
+  await ctx.reply(coins.map((coin) => {
+    const settings = getChatSettings(coin, ctx.chat.id);
+    return [
+      `$${coin.symbol}`,
+      `CA: ${coin.contract}`,
+      `Media: ${settings.media ? settings.media.type : 'token metadata'}`,
+      `Emojis: ${settings.emojiLine || 'auto'}`,
+      `Top Movers: ${settings.showTopMovers === false ? 'off' : 'on'}`,
+      `Footer: ${settings.showFooter === false ? 'off' : 'on'}`,
+      `Bonding: ${settings.showBonding === false ? 'off' : 'on'}`,
+      `Socials: ${settings.showSocials === false ? 'off' : 'on'}`
+    ].join('\n');
+  }).join('\n\n'));
+}
+
+async function autoTrackContractFromChat(ctx) {
+  if (!ctx.chat || ctx.chat.type === 'private') return;
+
+  const existingCoins = await getCoinsByChat(ctx.chat.id);
+  if (existingCoins.length > 0) return;
+
+  const isAdmin = await isBotAdminInChat(ctx.chat.id);
+  if (!isAdmin) return;
+
+  const contract = extractSolanaContract(getUpdateText(ctx));
+  if (!contract) return;
+
+  const tokenMeta = await getTokenMetadata(contract);
+  const symbol = normalizeAutoSymbol(tokenMeta?.symbol || ctx.chat.title || ctx.chat.username || 'COIN');
+  const buyUrl = `https://pump.fun/coin/${contract}`;
+  const coin = await addChannelToCoinByContract(contract, ctx.chat.id, {
+    symbol,
+    name: tokenMeta?.name || symbol,
+    buyUrl,
+    website: tokenMeta?.website || buyUrl,
+    imageUrl: tokenMeta?.imageUrl,
+    twitter: tokenMeta?.twitter,
+    telegram: tokenMeta?.telegram
+  });
+  const heliusResult = await ensureHeliusTracksContract(coin.contract);
+  restartBitqueryStreamSoon();
+  restartPumpPortalStreamSoon();
+  restartNativeSolanaWatcherSoon();
+
+  await ctx.reply([
+    `Auto-tracked $${coin.symbol} from this chat.`,
+    coin.contract,
+    renderHeliusSyncStatus(heliusResult)
+  ].filter(Boolean).join('\n'));
+  await sendTelegramBackup(`Auto-tracked ${coin.symbol} ${coin.contract} for chat ${ctx.chat.id}.`);
+}
+
+function getChatSettings(coin, chatId) {
+  return coin.chatSettings?.[String(chatId)] ?? {};
+}
+
+function getAttachedMedia(ctx) {
+  const message = ctx.message
+    ?? ctx.channelPost
+    ?? ctx.editedMessage
+    ?? ctx.editedChannelPost;
+  const reply = message?.reply_to_message;
+  const source = reply ?? message;
+  const photo = source?.photo?.at(-1);
+
+  if (photo?.file_id) {
+    return { type: 'photo', value: photo.file_id };
+  }
+
+  if (source?.video?.file_id) {
+    return { type: 'video', value: source.video.file_id };
+  }
+
+  if (source?.animation?.file_id) {
+    return { type: 'animation', value: source.animation.file_id };
+  }
+
+  return null;
+}
+
+function mediaFromUrl(url) {
+  if (!/^https?:\/\//i.test(url)) return null;
+  const cleanUrl = url.trim();
+  const type = /\.(mp4|mov|webm)(\?|$)/i.test(cleanUrl) ? 'video' : 'photo';
+  return { type, value: cleanUrl };
+}
+
+function parseOptionalTargetAndValue(ctx, args) {
+  const mediaUrl = args.find((arg) => /^https?:\/\//i.test(arg));
+  const target = args.find((arg) => arg !== mediaUrl);
+  return { target, mediaUrl };
+}
+
+async function parseOptionalCoinTarget(chatId, args) {
+  const coins = await getCoinsByChat(chatId);
+  const first = args[0]?.replace(/^\$+/, '').toLowerCase();
+  const hasTarget = coins.some((coin) => (
+    coin.symbol?.toLowerCase() === first
+    || coin.contract?.toLowerCase() === first
+  ));
+
+  return {
+    target: hasTarget ? args[0] : undefined,
+    value: hasTarget ? args.slice(1).join(' ') : args.join(' ')
+  };
+}
+
+async function parseBuySettingsArgs(chatId, args) {
+  const coins = await getCoinsByChat(chatId);
+  const first = args[0]?.replace(/^\$+/, '').toLowerCase();
+  const hasTarget = coins.some((coin) => (
+    coin.symbol?.toLowerCase() === first
+    || coin.contract?.toLowerCase() === first
+  ));
+  const parts = hasTarget ? args.slice(1) : args;
+  const key = parts[0]?.toLowerCase();
+  const value = parts[1]?.toLowerCase();
+  const enabled = value === 'on' || value === 'true' || value === 'yes'
+    ? true
+    : value === 'off' || value === 'false' || value === 'no'
+      ? false
+      : null;
+
+  return {
+    target: hasTarget ? args[0] : undefined,
+    key,
+    enabled
+  };
+}
+
+function extractSolanaContract(text) {
+  const pumpMatch = text.match(/pump\.fun\/coin\/([1-9A-HJ-NP-Za-km-z]{32,44})/i);
+  if (pumpMatch) return pumpMatch[1];
+
+  const caMatch = text.match(/\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/);
+  return caMatch?.[0] ?? null;
+}
+
+function normalizeAutoSymbol(value) {
+  const cleaned = String(value)
+    .replace(/[^a-z0-9]/gi, '')
+    .slice(0, 12)
+    .toUpperCase();
+
+  return cleaned || 'COIN';
 }
 
 async function trackSymbolForChat(ctx, symbol) {
@@ -1553,17 +1829,21 @@ async function postBuyAlert({ coin, eventInput }) {
   });
 
   if (!event) {
-    return { duplicate: true, results: [] };
+    return { duplicate: true, results: [], channels: [] };
   }
 
   const trending = await getTrendingCoins(Number(TRENDING_LIMIT));
   const primaryCoin = await getPrimaryCoin();
   const tokenMeta = await getTokenMetadata(coin.contract);
-  const message = renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta });
-  const channels = getAlertChannels(coin);
+  const channels = await getEligibleAlertChannels(coin);
 
   const results = await Promise.allSettled(
-    channels.map((chatId) => sendBuyAlertToChat(chatId, message, tokenMeta?.imageUrl))
+    channels.map((chatId) => {
+      const chatSettings = getChatSettings(coin, chatId);
+      const message = renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta, chatSettings });
+      const media = chatSettings.media ?? (tokenMeta?.imageUrl ? { type: 'photo', value: tokenMeta.imageUrl } : null);
+      return sendBuyAlertToChat(chatId, message, media);
+    })
   );
 
   results.forEach((result, index) => {
@@ -1572,18 +1852,32 @@ async function postBuyAlert({ coin, eventInput }) {
     }
   });
 
-  return { event, results };
+  return { event, results, channels };
 }
 
-async function sendBuyAlertToChat(chatId, message, imageUrl) {
-  if (imageUrl) {
+async function sendBuyAlertToChat(chatId, message, media) {
+  if (media?.value) {
     try {
-      return await bot.telegram.sendPhoto(chatId, imageUrl, {
+      if (media.type === 'video') {
+        return await bot.telegram.sendVideo(chatId, media.value, {
+          caption: message,
+          parse_mode: 'HTML'
+        });
+      }
+
+      if (media.type === 'animation') {
+        return await bot.telegram.sendAnimation(chatId, media.value, {
+          caption: message,
+          parse_mode: 'HTML'
+        });
+      }
+
+      return await bot.telegram.sendPhoto(chatId, media.value, {
         caption: message,
         parse_mode: 'HTML'
       });
     } catch (error) {
-      console.error(`Failed to send token image to ${chatId}, falling back to text:`, error.message);
+      console.error(`Failed to send token media to ${chatId}, falling back to text:`, error.message);
     }
   }
 
@@ -1594,16 +1888,31 @@ async function sendBuyAlertToChat(chatId, message, imageUrl) {
 }
 
 function getAlertChannels(coin) {
-  const configuredChannels = coin.channels ?? [];
-  const fallbackChannels = ALERT_CHAT_ID
-    ? ALERT_CHAT_ID.split(',').map((chatId) => chatId.trim()).filter(Boolean)
-    : [];
+  return Array.from(new Set((coin.channels ?? []).map(String).filter(Boolean)));
+}
 
-  if (configuredChannels.length > 0) {
-    return Array.from(new Set(configuredChannels));
+async function getEligibleAlertChannels(coin) {
+  const configuredChannels = getAlertChannels(coin);
+  const results = await Promise.all(
+    configuredChannels.map(async (chatId) => ({
+      chatId,
+      isAdmin: await isBotAdminInChat(chatId)
+    }))
+  );
+
+  return results
+    .filter((result) => result.isAdmin)
+    .map((result) => result.chatId);
+}
+
+async function isBotAdminInChat(chatId) {
+  try {
+    const member = await bot.telegram.getChatMember(chatId, botId ?? bot.botInfo?.id);
+    return ['administrator', 'creator'].includes(member.status);
+  } catch (error) {
+    console.error(`Skipping buy alert for chat ${chatId}; bot admin check failed:`, error.message);
+    return false;
   }
-
-  return Array.from(new Set(fallbackChannels));
 }
 
 async function parseHeliusTransaction(transaction) {

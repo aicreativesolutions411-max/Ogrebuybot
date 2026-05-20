@@ -17,8 +17,8 @@ const compact = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2
 });
 
-export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }) {
-  const theme = getCoinTheme(coin, tokenMeta);
+export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta, chatSettings = {} }) {
+  const theme = getCoinTheme(coin, tokenMeta, chatSettings);
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
   const buyer = event.buyer && event.buyer !== 'DEXSCREENER_AGGREGATE' ? shortWallet(event.buyer) : null;
   const tokenAmount = Number(event.tokenAmount ?? 0);
@@ -29,8 +29,8 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
   const marketCap = event.marketCap ? money.format(Number(event.marketCap)) : tokenMeta?.marketCapUsd ? money.format(Number(tokenMeta.marketCapUsd)) : null;
   const txLine = event.txUrl ? `<a href="${escapeHtml(event.txUrl)}">Chart</a>` : null;
   const buyLine = coin.buyUrl ? `<a href="${escapeHtml(coin.buyUrl)}">Buy</a>` : null;
-  const socialsLine = renderSocials(coin, tokenMeta);
-  const bondingLine = renderBondingProcess(tokenMeta, theme);
+  const socialsLine = chatSettings.showSocials === false ? null : renderSocials(coin, tokenMeta);
+  const bondingLine = chatSettings.showBonding === false ? null : renderBondingProcess(tokenMeta, theme);
 
   return [
     theme.border,
@@ -51,8 +51,8 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta }
     renderDexPaidLine(event.dex),
     '',
     [txLine, buyLine].filter(Boolean).join(' | '),
-    renderAdBlock({ trending, primaryCoin }),
-    renderOgreFooter(),
+    chatSettings.showTopMovers === false ? null : renderAdBlock({ trending, primaryCoin }),
+    chatSettings.showFooter === false ? null : renderOgreFooter(),
     theme.border
   ].filter(Boolean).join('\n');
 }
@@ -79,7 +79,15 @@ function renderBondingProcess(tokenMeta, theme) {
   ].join('\n');
 }
 
-function getCoinTheme(coin, tokenMeta) {
+function getCoinTheme(coin, tokenMeta, chatSettings = {}) {
+  if (chatSettings.emojiLine) {
+    return {
+      border: chatSettings.emojiLine,
+      filled: '🟢',
+      empty: '⚫'
+    };
+  }
+
   const text = `${coin?.symbol ?? ''} ${coin?.name ?? ''} ${tokenMeta?.name ?? ''}`.toLowerCase();
   const has = (...words) => words.some((word) => text.includes(word));
 

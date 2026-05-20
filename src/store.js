@@ -199,6 +199,40 @@ export async function addChannelToCoinByContract(contract, chatId, defaults = {}
   return coin;
 }
 
+export async function updateCoinChatSettings(chatId, target, settings) {
+  const store = await readStore();
+  const normalizedChatId = String(chatId);
+  const normalizedTarget = target ? String(target).replace(/^\$+/, '').toLowerCase() : '';
+  const chatCoins = store.coins.filter((coin) => (coin.channels ?? []).map(String).includes(normalizedChatId));
+  const coin = normalizedTarget
+    ? store.coins.find((item) => (
+      item.symbol?.toLowerCase() === normalizedTarget
+      || item.contract?.toLowerCase() === normalizedTarget
+    ))
+    : chatCoins[0];
+
+  if (!coin || !(coin.channels ?? []).map(String).includes(normalizedChatId)) {
+    throw new Error(target
+      ? `This chat is not tracking ${target}.`
+      : 'This chat is not tracking a coin yet. Use /setcoin first.');
+  }
+
+  if (!target && chatCoins.length > 1) {
+    throw new Error('This chat tracks more than one coin. Add the symbol, like /setmedia OGRE.');
+  }
+
+  coin.chatSettings = {
+    ...(coin.chatSettings ?? {}),
+    [normalizedChatId]: {
+      ...(coin.chatSettings?.[normalizedChatId] ?? {}),
+      ...settings
+    }
+  };
+
+  await writeStore(store);
+  return coin;
+}
+
 export async function getTrackedChats() {
   const store = await readStore();
   return store.coins.flatMap((coin) => (coin.channels ?? []).map((chatId) => ({
