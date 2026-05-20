@@ -101,6 +101,8 @@ const buyEventSchema = z.object({
   quoteSymbol: z.string().optional(),
   marketCap: z.coerce.number().nonnegative().optional(),
   dex: z.string().optional(),
+  side: z.string().optional(),
+  chartUrl: z.string().url().optional(),
   txUrl: z.string().url().optional()
 }).refine((event) => event.symbol || event.contract, {
   message: 'Either symbol or contract is required.'
@@ -338,7 +340,7 @@ bot.command('testbuy', async (ctx) => {
       quoteAmount: 1,
       quoteSymbol: DEFAULT_QUOTE_SYMBOL,
       dex: 'test',
-      txUrl: coin.website
+      chartUrl: getDexScreenerChartUrl(coin.contract)
     }
   });
 
@@ -502,7 +504,7 @@ app.get('/api/test-alert/:symbol', async (req, res) => {
       quoteSymbol: DEFAULT_QUOTE_SYMBOL,
       buyerSolBalance: 5.25,
       dex: 'render-test',
-      txUrl: coin.website
+      chartUrl: getDexScreenerChartUrl(coin.contract)
     }
   });
 
@@ -546,7 +548,7 @@ app.get('/api/test-alert-contract/:contract', async (req, res) => {
       quoteSymbol: DEFAULT_QUOTE_SYMBOL,
       buyerSolBalance: 5.25,
       dex: 'render-test',
-      txUrl: coin.website || coin.buyUrl
+      chartUrl: getDexScreenerChartUrl(coin.contract)
     }
   });
 
@@ -575,6 +577,11 @@ app.post('/api/buy', async (req, res) => {
   const parsed = buyEventSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+
+  if (isSellLikeEvent(parsed.data)) {
+    res.status(202).json({ ok: true, ignored: true, reason: 'sell-event' });
     return;
   }
 
@@ -887,6 +894,7 @@ async function processBitqueryMessage(data) {
       quoteSymbol: sellSymbol,
       dex: row.Trade?.Dex?.ProtocolName ?? row.Trade?.Dex?.ProtocolFamily ?? 'Bitquery DEX',
       txSignature: row.Transaction?.Signature,
+      chartUrl: getDexScreenerChartUrl(contract),
       txUrl: row.Transaction?.Signature ? `https://solscan.io/tx/${row.Transaction.Signature}` : undefined
     };
 
@@ -971,6 +979,7 @@ async function processPumpPortalTrade(event) {
       marketCap: event.marketCapUsd,
       dex: event.pool ? `PumpPortal ${event.pool}` : 'PumpPortal',
       txSignature: event.signature,
+      chartUrl: getDexScreenerChartUrl(event.mint),
       txUrl: event.signature ? `https://solscan.io/tx/${event.signature}` : undefined
     }
   });
@@ -1102,6 +1111,7 @@ function parseNativeSolanaBuy(transaction, contract, signature) {
     quoteSymbol: 'SOL',
     dex: 'Native Solana watcher',
     txSignature: signature,
+    chartUrl: getDexScreenerChartUrl(contract),
     txUrl: `https://solscan.io/tx/${signature}`
   };
 }
@@ -1223,7 +1233,7 @@ async function pollDexScreenerOnce() {
         marketCap: pair.marketCap,
         dex: `${pair.dexId ?? 'dex'} aggregate`,
         txSignature: `dexscreener-${pair.pairAddress}-${currentBuys}-${Date.now()}`,
-        txUrl: pair.url
+        chartUrl: pair.url
       }
     });
   }
@@ -2133,7 +2143,7 @@ async function sendTestBuy(ctx, symbol) {
       quoteAmount: 1,
       quoteSymbol: DEFAULT_QUOTE_SYMBOL,
       dex: 'test',
-      txUrl: coin.website
+      chartUrl: getDexScreenerChartUrl(coin.contract)
     }
   });
 
@@ -2210,10 +2220,15 @@ function escapeHtmlForTelegram(value) {
 }
 
 async function postBuyAlert({ coin, eventInput }) {
+  if (isSellLikeEvent(eventInput)) {
+    return { ignored: true, reason: 'sell-event', results: [], channels: [] };
+  }
+
   const event = await recordBuyEvent({
     ...eventInput,
     symbol: coin.symbol,
     contract: eventInput.contract ?? coin.contract,
+    chartUrl: eventInput.chartUrl ?? coin.chartUrl ?? getDexScreenerChartUrl(eventInput.contract ?? coin.contract),
     quoteSymbol: eventInput.quoteSymbol ?? DEFAULT_QUOTE_SYMBOL
   });
 
@@ -2287,6 +2302,15 @@ function getAlertChannels(coin) {
   return Array.from(new Set((coin.channels ?? []).map(String).filter(Boolean)));
 }
 
+function getDexScreenerChartUrl(contract) {
+  return `https://dexscreener.com/solana/${encodeURIComponent(contract)}`;
+}
+
+function isSellLikeEvent(eventInput = {}) {
+  const side = String(eventInput.side ?? eventInput.txType ?? eventInput.type ?? '').toLowerCase();
+  return side === 'sell' || side === 'token_sell' || side.includes('sell');
+}
+
 async function getEligibleAlertChannels(coin) {
   const configuredChannels = getAlertChannels(coin);
   const results = await Promise.all(
@@ -2328,7 +2352,7 @@ async function isBotAdminInChat(chatId) {
 
 async function parseHeliusTransaction(transaction) {
   const tokenTransfers = [
-    ...(transaction.tokenTransfers ?? []),
+    ...(transaction.tokenTransfers ?? []).map((transfer) => ({ ...transfer, sourceType: 'token-transfer' })),
     ...getSwapTokenOutputs(transaction),
     ...getTokenBalanceChangeOutputs(transaction)
   ];
@@ -2344,8 +2368,12 @@ async function parseHeliusTransaction(transaction) {
     const buyer = transfer.toUserAccount ?? transfer.userAccount ?? transaction.feePayer;
     if (!buyer) continue;
 
+    if (transfer.sourceType === 'token-transfer' && transaction.feePayer && buyer !== transaction.feePayer) {
+      continue;
+    }
+
     const solSpent = getSolSpentByWallet(transaction, nativeTransfers, buyer);
-    if (solSpent <= 0 && !isLikelySwapBuy(transaction)) continue;
+    if (solSpent <= 0) continue;
 
     const buyerSolBalance = await getSolBalance(buyer);
     const priceUsd = await getTokenPriceUsd(contract);
@@ -2362,6 +2390,7 @@ async function parseHeliusTransaction(transaction) {
       buyerSolBalance,
       dex: source,
       txSignature: signature,
+      chartUrl: getDexScreenerChartUrl(contract),
       txUrl: signature ? `https://solscan.io/tx/${signature}` : undefined
     });
   }
@@ -2374,6 +2403,7 @@ function getSwapTokenOutputs(transaction) {
 
   return outputs.map((output) => ({
     mint: output.mint,
+    sourceType: 'swap-output',
     toUserAccount: output.userAccount ?? output.toUserAccount ?? output.account,
     tokenAmount: output.tokenAmount ?? parseRawTokenAmount(output.rawTokenAmount)
   }));
@@ -2386,6 +2416,7 @@ function getTokenBalanceChangeOutputs(transaction) {
         const tokenAmount = getTokenAmountFromBalanceChange(change);
         return {
           mint: change.mint,
+          sourceType: 'balance-change',
           toUserAccount: change.userAccount ?? account.account,
           tokenAmount
         };

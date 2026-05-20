@@ -20,14 +20,15 @@ const compact = new Intl.NumberFormat('en-US', {
 export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta, chatSettings = {} }) {
   const theme = getCoinTheme(coin, tokenMeta, chatSettings);
   const tokenName = tokenMeta?.name || coin.name || coin.symbol;
-  const buyer = event.buyer && event.buyer !== 'DEXSCREENER_AGGREGATE' ? shortWallet(event.buyer) : null;
+  const buyer = renderBuyerLink(event.buyer);
   const tokenAmount = Number(event.tokenAmount ?? 0);
   const tokens = number.format(tokenAmount);
   const usdValue = Number(event.usdValue ?? 0);
   const quoteAmount = event.quoteAmount ? `${number.format(Number(event.quoteAmount))} ${event.quoteSymbol ?? 'SOL'}` : null;
   const position = event.buyerSolBalance != null ? `${formatSigned(Number(event.buyerSolBalance))}%` : null;
   const marketCap = event.marketCap ? money.format(Number(event.marketCap)) : tokenMeta?.marketCapUsd ? money.format(Number(tokenMeta.marketCapUsd)) : null;
-  const txLine = event.txUrl ? `<a href="${escapeHtml(event.txUrl)}">Chart</a>` : null;
+  const chartLine = `<a href="${escapeHtml(getChartUrl(coin, event))}">Chart</a>`;
+  const txLine = event.txUrl ? `<a href="${escapeHtml(event.txUrl)}">Tx</a>` : null;
   const buyLine = coin.buyUrl ? `<a href="${escapeHtml(coin.buyUrl)}">Buy</a>` : null;
   const socialsLine = chatSettings.showSocials === false ? null : renderSocials(coin, tokenMeta);
   const bondingLine = chatSettings.showBonding === false ? null : renderBondingProcess(tokenMeta, theme);
@@ -46,13 +47,13 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta, 
     tokenAmount > 0 ? `<b>${formatTicker(coin.symbol)}</b> ${escapeHtml(tokens)} (${escapeHtml(formatMultiplier(tokenAmount))})` : null,
     event.aggregateVolumeUsd ? `<b>Amount:</b> ${escapeHtml(money.format(Number(event.aggregateVolumeUsd)))}` : null,
     position ? `<b>Position:</b> ${escapeHtml(position)} <i>(Wallet)</i>` : null,
-    buyer ? `Buyer: <b>${escapeHtml(buyer)}</b>` : null,
+    buyer ? `Buyer: <b>${buyer}</b>` : null,
     marketCap ? `<b>MCap:</b> ${escapeHtml(marketCap)}` : null,
     socialsLine ? `<b>Socials:</b> ${socialsLine}` : null,
     '',
     renderDexPaidLine(event.dex),
     '',
-    [txLine, buyLine].filter(Boolean).join(' | '),
+    [chartLine, txLine, buyLine].filter(Boolean).join(' | '),
     chatSettings.showTopMovers === false ? null : renderAdBlock({ trending, primaryCoin }),
     chatSettings.showFooter === false ? null : renderOgreFooter(),
     theme.border
@@ -215,6 +216,19 @@ function renderOgreFooter() {
     '<b>powered by ogres</b>',
     `<a href="${OGRE_TELEGRAM}">Telegram</a> | <a href="${OGRE_WEBSITE}">Website</a> | <a href="${OGRE_TWITTER}">Twitter</a>`
   ].join('\n');
+}
+
+function getChartUrl(coin, event) {
+  return event.chartUrl
+    || coin.chartUrl
+    || `https://dexscreener.com/solana/${encodeURIComponent(coin.contract)}`;
+}
+
+function renderBuyerLink(wallet) {
+  if (!wallet || wallet === 'DEXSCREENER_AGGREGATE') return null;
+
+  const cleanWallet = String(wallet);
+  return `<a href="https://solscan.io/account/${escapeHtml(cleanWallet)}">${escapeHtml(shortWallet(cleanWallet))}</a>`;
 }
 
 export function renderCoinList(coins) {
