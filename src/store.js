@@ -27,21 +27,19 @@ export async function readStore() {
 }
 
 export async function writeStore(store) {
-  cacheStore(store);
+  const normalized = normalizeStore(store);
+  cacheStore(normalized);
 
   if (hasSupabaseStore()) {
-    await writeSupabaseStore(store);
+    await writeSupabaseStore(normalized);
     return;
   }
 
-  await writeLocalStore(store);
+  await writeLocalStore(normalized);
 }
 
 export async function replaceStore(store) {
-  const normalized = {
-    coins: Array.isArray(store.coins) ? store.coins : [],
-    events: Array.isArray(store.events) ? store.events : []
-  };
+  const normalized = normalizeStore(store);
 
   await writeStore(normalized);
   return normalized;
@@ -58,12 +56,27 @@ async function writeLocalStore(store) {
 }
 
 function cacheStore(store) {
+  const normalized = normalizeStore(store);
   storeCache = {
-    data: store,
+    data: normalized,
     expiresAt: Date.now() + Math.max(0, STORE_CACHE_MS)
   };
 
-  return store;
+  return normalized;
+}
+
+function normalizeStore(store = {}) {
+  return {
+    ...store,
+    coins: Array.isArray(store.coins) ? store.coins : [],
+    events: Array.isArray(store.events) ? store.events : [],
+    groupSettings: store.groupSettings && typeof store.groupSettings === 'object'
+      ? store.groupSettings
+      : {},
+    warnings: store.warnings && typeof store.warnings === 'object'
+      ? store.warnings
+      : {}
+  };
 }
 
 function hasSupabaseStore() {
@@ -250,6 +263,67 @@ export async function updateCoinChatSettings(chatId, target, settings) {
   return coin;
 }
 
+export async function getGroupSettings(chatId) {
+  const store = await readStore();
+  return normalizeGroupSettings(store.groupSettings?.[String(chatId)]);
+}
+
+export async function updateGroupSettings(chatId, settings) {
+  const store = await readStore();
+  const normalizedChatId = String(chatId);
+  const current = normalizeGroupSettings(store.groupSettings?.[normalizedChatId]);
+  const next = mergeGroupSettings(current, settings);
+
+  store.groupSettings = {
+    ...(store.groupSettings ?? {}),
+    [normalizedChatId]: next
+  };
+
+  await writeStore(store);
+  return next;
+}
+
+export async function addWarning(chatId, userId, warning = {}) {
+  const store = await readStore();
+  const key = getWarningKey(chatId, userId);
+  const current = Array.isArray(store.warnings?.[key]) ? store.warnings[key] : [];
+  const normalized = {
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
+    reason: '',
+    moderatorId: '',
+    ...warning
+  };
+
+  store.warnings = {
+    ...(store.warnings ?? {}),
+    [key]: [...current, normalized].slice(-25)
+  };
+
+  await writeStore(store);
+  return store.warnings[key];
+}
+
+export async function getWarnings(chatId, userId) {
+  const store = await readStore();
+  const warnings = store.warnings?.[getWarningKey(chatId, userId)];
+  return Array.isArray(warnings) ? warnings : [];
+}
+
+export async function clearWarnings(chatId, userId) {
+  const store = await readStore();
+  const key = getWarningKey(chatId, userId);
+  const count = Array.isArray(store.warnings?.[key]) ? store.warnings[key].length : 0;
+
+  store.warnings = {
+    ...(store.warnings ?? {})
+  };
+  delete store.warnings[key];
+
+  await writeStore(store);
+  return count;
+}
+
 export async function getTrackedChats() {
   const store = await readStore();
   return store.coins.flatMap((coin) => (coin.channels ?? []).map((chatId) => ({
@@ -257,6 +331,56 @@ export async function getTrackedChats() {
     symbol: coin.symbol,
     contract: coin.contract
   })));
+}
+
+function normalizeGroupSettings(settings = {}) {
+  return {
+    rules: typeof settings.rules === 'string' ? settings.rules : '',
+    maxWarnings: Number.isFinite(Number(settings.maxWarnings)) ? Math.max(1, Number(settings.maxWarnings)) : 3,
+    notes: normalizeTextMap(settings.notes),
+    filters: normalizeTextMap(settings.filters),
+    welcome: {
+      enabled: Boolean(settings.welcome?.enabled),
+      text: typeof settings.welcome?.text === 'string' && settings.welcome.text.trim()
+        ? settings.welcome.text
+        : 'Welcome {user} to {chat}!'
+    },
+    antiLinks: {
+      enabled: Boolean(settings.antiLinks?.enabled),
+      warn: settings.antiLinks?.warn !== false
+    }
+  };
+}
+
+function mergeGroupSettings(current, patch = {}) {
+  return normalizeGroupSettings({
+    ...current,
+    ...patch,
+    welcome: {
+      ...(current.welcome ?? {}),
+      ...(patch.welcome ?? {})
+    },
+    antiLinks: {
+      ...(current.antiLinks ?? {}),
+      ...(patch.antiLinks ?? {})
+    },
+    notes: patch.notes ?? current.notes,
+    filters: patch.filters ?? current.filters
+  });
+}
+
+function getWarningKey(chatId, userId) {
+  return `${String(chatId)}:${String(userId)}`;
+}
+
+function normalizeTextMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, text]) => key && typeof text === 'string' && text.trim())
+      .map(([key, text]) => [String(key).toLowerCase().slice(0, 60), text.slice(0, 3500)])
+  );
 }
 
 export async function recordBuyEvent(event) {

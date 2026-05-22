@@ -14,8 +14,10 @@ This folder contains a Telegram buy-alert bot for `$OGRE`.
 - Replies to Telegram commands.
 - Tracks `$OGRE` by default.
 - Posts buy alerts into Telegram chats/channels that run `/track OGRE`.
+- Adds a `Trade` button under buy alerts that opens `https://t.me/ogretradebot`.
 - Shows other trending coins that also use the bot.
 - Receives buy alerts through `POST /api/buy`.
+- Can also manage groups with rules, welcomes, anti-link moderation, warnings, mutes, kicks, bans, cleanups, pins, slowmode, locks, notes, filters, and clickable `/modsettings`.
 
 ## Important
 
@@ -120,8 +122,71 @@ The code now registers these commands automatically when the bot starts:
 - `/track OGRE`
 - `/testbuy OGRE`
 - `/addcoin SYMBOL Name | chain | contract | buyUrl`
+- `/modsettings`
+- `/rules`
+- `/setrules rules text`
+- `/welcome on|off`
+- `/setwelcome Welcome {user} to {chat}!`
+- `/antilinks on|off`
+- `/warn`
+- `/warnings`
+- `/clearwarns`
+- `/mute`
+- `/unmute`
+- `/kick`
+- `/ban`
+- `/unban`
+- `/clean 20`
+- `/pin`
+- `/unpin`
+- `/slowmode 10`
+- `/lock`
+- `/unlock`
+- `/save name text`
+- `/get name`
+- `/notes`
+- `/delnote name`
+- `/filter trigger reply text`
+- `/filters`
+- `/stopfilter trigger`
 
 If the command menu does not show right away in Telegram, restart the bot and wait a minute. You can still type the commands manually.
+
+## Group Manager Setup
+
+1. Add the bot to your group as admin.
+2. Give it permission to delete messages, ban users, and restrict users.
+3. Open the clickable menu:
+
+   ```text
+   /modsettings
+   ```
+
+   The menu stays in one Telegram message. Use the submenu buttons for Protection, Welcome, Rules & Notes, Filters, and Chat Tools, then use Back to keep making changes without spamming the chat.
+
+4. Optional setup commands:
+
+   ```text
+   /setrules Keep it clean, no spam, no scam links.
+   /setwelcome Welcome {user} to {chat}!
+   /welcome on
+   /antilinks on
+   ```
+
+For `/warn`, `/mute`, `/kick`, and `/ban`, reply to the user's message with the command. You can also pass a numeric Telegram user id.
+
+Extra quality-of-life commands:
+
+```text
+/clean 20
+/pin
+/slowmode 10
+/lock
+/unlock
+/save ca Contract address: 5RAZMWd9RiKfodLPQ73cFk4CMoJzTUsATUoRdDThpump
+/get ca
+/filter website Official site: https://ogremode.com/
+```
 
 ## Helius Free Webhook Setup
 
