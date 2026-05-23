@@ -75,6 +75,9 @@ function normalizeStore(store = {}) {
       : {},
     warnings: store.warnings && typeof store.warnings === 'object'
       ? store.warnings
+      : {},
+    knownChats: store.knownChats && typeof store.knownChats === 'object'
+      ? store.knownChats
       : {}
   };
 }
@@ -322,6 +325,35 @@ export async function clearWarnings(chatId, userId) {
 
   await writeStore(store);
   return count;
+}
+
+export async function recordKnownChat(chat) {
+  if (!chat?.id || chat.type === 'private') return null;
+
+  const store = await readStore();
+  const normalizedChatId = String(chat.id);
+  const current = store.knownChats?.[normalizedChatId] ?? {};
+  const next = {
+    ...current,
+    id: normalizedChatId,
+    type: chat.type ?? current.type ?? 'unknown',
+    title: chat.title ?? current.title ?? '',
+    username: chat.username ?? current.username ?? '',
+    lastSeenAt: new Date().toISOString()
+  };
+
+  store.knownChats = {
+    ...(store.knownChats ?? {}),
+    [normalizedChatId]: next
+  };
+
+  await writeStore(store);
+  return next;
+}
+
+export async function getKnownChats() {
+  const store = await readStore();
+  return Object.values(store.knownChats ?? {});
 }
 
 export async function getTrackedChats() {

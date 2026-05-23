@@ -15,12 +15,14 @@ import {
   getCoinByContract,
   getCoinsByChat,
   getGroupSettings,
+  getKnownChats,
   getPrimaryCoin,
   getTrackedChats,
   getTrendingCoins,
   getWarnings,
   replaceStore,
   readStore,
+  recordKnownChat,
   recordBuyEvent,
   updateGroupSettings,
   updateCoinChatSettings,
@@ -92,6 +94,7 @@ const nativeSolanaSeenSignatures = new Set();
 const dexScreenerState = new Map();
 const tokenMetadataCache = new Map();
 const adminStatusCache = new Map();
+const knownChatMemory = new Map();
 const minBuySol = Math.max(0, Number(MIN_BUY_SOL) || 0.0001);
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 const OGRE_TRADE_BOT_URL = 'https://t.me/ogretradebot';
@@ -240,18 +243,12 @@ bot.on('my_chat_member', async (ctx) => {
 
   if (['member', 'administrator'].includes(status)) {
     console.log(`Bot was added to chat ${chat.id} (${chat.title ?? chat.username ?? chat.type}). Use /setcoin SYMBOL CONTRACT in that chat to enable buy alerts.`);
+    await rememberChat(chat, { force: true });
 
     try {
       const fullChat = await bot.telegram.getChat(chat.id);
-      const text = [
-        fullChat.title,
-        fullChat.username,
-        fullChat.description,
-        fullChat.bio,
-        fullChat.pinned_message?.text,
-        fullChat.pinned_message?.caption
-      ].filter(Boolean).join('\n');
-      const contract = extractSolanaContract(text, { allowBare: false });
+      const text = buildChatDiscoveryText({ chat, fullChat });
+      const contract = extractBestSolanaContract(text, { allowBare: true });
 
       if (contract && await isBotAdminInChat(chat.id)) {
         await autoTrackContractForChat({
@@ -1507,6 +1504,10 @@ async function main() {
     { command: 'stopfilter', description: 'Delete an auto reply filter' }
   ]);
 
+  recoverKnownChatTracking().catch((error) => {
+    console.error('Known chat recovery failed:', error.message);
+  });
+
   if (telegramWebhookUrl) {
     await bot.telegram.setWebhook(telegramWebhookUrl, {
       drop_pending_updates: true,
@@ -1607,6 +1608,7 @@ function getReplyText(ctx) {
 }
 
 async function handleFallbackCommand(ctx) {
+  await rememberChat(ctx.chat);
   if (await handlePendingSettingsReply(ctx)) return;
   if (await handleWelcomeEvent(ctx)) return;
 
@@ -3317,18 +3319,107 @@ function parseBuyEmojiValue(value) {
   };
 }
 
+async function rememberChat(chat, options = {}) {
+  if (!chat?.id || chat.type === 'private') return;
+
+  const key = String(chat.id);
+  const lastSeen = knownChatMemory.get(key) ?? 0;
+  if (!options.force && Date.now() - lastSeen < 10 * 60 * 1000) return;
+
+  knownChatMemory.set(key, Date.now());
+  await recordKnownChat(chat).catch((error) => {
+    console.error(`Could not remember chat ${key}:`, error.message);
+  });
+}
+
+async function recoverKnownChatTracking() {
+  const chats = await getKnownChats();
+  if (chats.length === 0) return;
+
+  let recovered = 0;
+  for (const chat of chats) {
+    const existingCoins = await getCoinsByChat(chat.id);
+    if (existingCoins.length > 0) continue;
+
+    try {
+      const fullChat = await bot.telegram.getChat(chat.id);
+      await rememberChat(fullChat, { force: true });
+      const text = buildChatDiscoveryText({ chat, fullChat });
+      const contract = extractBestSolanaContract(text, { allowBare: true });
+      if (!contract) continue;
+      if (!await isBotAdminInChat(chat.id)) continue;
+
+      const coin = await autoTrackContractForChat({
+        chatId: chat.id,
+        chatTitle: fullChat.title ?? chat.title,
+        chatUsername: fullChat.username ?? chat.username,
+        contract,
+        reply: (message) => bot.telegram.sendMessage(chat.id, message).catch((error) => {
+          console.error(`Could not send auto-recovery notice to ${chat.id}:`, error.message);
+        })
+      });
+      if (coin) recovered += 1;
+    } catch (error) {
+      console.error(`Could not recover tracking for chat ${chat.id}:`, error.message);
+    }
+  }
+
+  if (recovered > 0) {
+    restartBitqueryStreamSoon();
+    restartPumpPortalStreamSoon();
+    restartNativeSolanaWatcherSoon();
+    console.log(`Auto-recovered ${recovered} chat CA tracking setup(s).`);
+  }
+}
+
+async function getAutoTrackDiscoveryText(ctx, options = {}) {
+  const message = getUpdateMessage(ctx);
+  let fullChat = null;
+
+  if (options.includeChatProfile) {
+    try {
+      fullChat = await bot.telegram.getChat(ctx.chat.id);
+    } catch (error) {
+      console.error(`Could not read chat profile for ${ctx.chat.id}:`, error.message);
+    }
+  }
+
+  return [
+    getUpdateTextWithReply(ctx),
+    message?.pinned_message?.text,
+    message?.pinned_message?.caption,
+    buildChatDiscoveryText({ chat: ctx.chat, fullChat })
+  ].filter(Boolean).join('\n');
+}
+
+function buildChatDiscoveryText({ chat, fullChat }) {
+  return [
+    chat?.title,
+    chat?.username,
+    fullChat?.title,
+    fullChat?.username,
+    fullChat?.description,
+    fullChat?.bio,
+    fullChat?.pinned_message?.text,
+    fullChat?.pinned_message?.caption
+  ].filter(Boolean).join('\n');
+}
+
 async function autoTrackContractFromChat(ctx, options = {}) {
   if (!ctx.chat || ctx.chat.type === 'private') return;
+  await rememberChat(ctx.chat);
 
   const existingCoins = await getCoinsByChat(ctx.chat.id);
-  const text = getUpdateTextWithReply(ctx);
+  const text = await getAutoTrackDiscoveryText(ctx, {
+    includeChatProfile: options.force || existingCoins.length === 0
+  });
   const hasExplicitCaContext = hasCaContext(text);
   if (existingCoins.length > 0 && !options.force && !hasExplicitCaContext) return;
 
   const isAdmin = await isBotAdminInChat(ctx.chat.id);
   if (!isAdmin) return;
 
-  const contract = extractSolanaContract(text, {
+  const contract = extractBestSolanaContract(text, {
     allowBare: options.force || existingCoins.length === 0 || hasExplicitCaContext
   });
   if (!contract) {
@@ -3355,6 +3446,12 @@ async function autoTrackContractFromChat(ctx, options = {}) {
 }
 
 async function autoTrackContractForChat({ chatId, chatTitle, chatUsername, contract, reply }) {
+  await recordKnownChat({
+    id: chatId,
+    title: chatTitle,
+    username: chatUsername
+  });
+
   const existingCoins = await getCoinsByChat(chatId);
   if (existingCoins.some((coin) => coin.contract?.toLowerCase() === contract.toLowerCase())) {
     return null;
@@ -3472,6 +3569,20 @@ function extractSolanaContract(text, options = {}) {
 
   const caMatch = text.match(/\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/);
   return caMatch?.[0] ?? null;
+}
+
+function extractBestSolanaContract(text, options = {}) {
+  const value = String(text ?? '');
+  const pumpLink = value.match(/pump\.fun\/coin\/([1-9A-HJ-NP-Za-km-z]{32,44})/i);
+  if (pumpLink) return pumpLink[1];
+
+  const pumpSuffix = value.match(/\b[1-9A-HJ-NP-Za-km-z]{28,44}pump\b/i);
+  if (pumpSuffix) return pumpSuffix[0];
+
+  const explicit = extractSolanaContract(value, { allowBare: false });
+  if (explicit) return explicit;
+
+  return options.allowBare ? extractSolanaContract(value, { allowBare: true }) : null;
 }
 
 function hasCaContext(text) {

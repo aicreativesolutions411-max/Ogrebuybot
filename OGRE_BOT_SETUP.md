@@ -164,6 +164,8 @@ If the command menu does not show right away in Telegram, restart the bot and wa
 
    The menu stays in one Telegram message. Use the submenu buttons for Protection, Welcome, Rules & Notes, Filters, and Chat Tools, then use Back to keep making changes without spamming the chat.
 
+The bot also self-heals CA setup after restarts. It remembers groups/channels it sees and checks pinned messages, chat descriptions, replies, and Pump.fun links for a CA when a chat has no tracked coin.
+
 4. Optional setup commands:
 
    ```text

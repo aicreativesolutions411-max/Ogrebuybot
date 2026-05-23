@@ -97,6 +97,8 @@ The bot must be a group admin with delete, ban, and restrict permissions for ant
 
 Buy alerts also include a `Trade` button that opens `https://t.me/ogretradebot`.
 
+Auto-recovery: the bot remembers groups/channels it sees and rescans known chats after restarts. If a chat has no tracked CA, it checks the newest message, replied message, pinned message, chat description, and Pump.fun links to auto-link the CA and restart buy streams.
+
 ## Send A Buy Event
 
 Use your secret in the `x-bot-secret` header:
