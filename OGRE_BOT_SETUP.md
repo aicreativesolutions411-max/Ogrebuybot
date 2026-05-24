@@ -166,6 +166,26 @@ If the command menu does not show right away in Telegram, restart the bot and wa
 
 The bot also self-heals CA setup after restarts. It remembers groups/channels it sees and checks pinned messages, chat descriptions, replies, and Pump.fun links for a CA when a chat has no tracked coin.
 
+The `DEX PAID` badge is checked through DexScreener paid orders and only shows when a paid order exists.
+
+## Overnight Reliability
+
+For Render, keep these enabled so the bot does not look alive while buy listeners have gone stale:
+
+```env
+ENABLE_KEEP_ALIVE=true
+KEEP_ALIVE_URL=https://your-render-app.onrender.com/health
+ENABLE_LISTENER_WATCHDOG=true
+LISTENER_WATCHDOG_INTERVAL_MS=60000
+LISTENER_PERIODIC_RESTART_MS=1800000
+ENABLE_BUY_FAILSAFE_POLLING=true
+BUY_FAILSAFE_POLL_INTERVAL_MS=60000
+```
+
+Open this URL to check listener health:
+
+`https://your-render-app.onrender.com/api/debug/listeners`
+
 4. Optional setup commands:
 
    ```text

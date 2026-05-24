@@ -99,6 +99,15 @@ Buy alerts also include a `Trade` button that opens `https://t.me/ogretradebot`.
 
 Auto-recovery: the bot remembers groups/channels it sees and rescans known chats after restarts. If a chat has no tracked CA, it checks the newest message, replied message, pinned message, chat description, and Pump.fun links to auto-link the CA and restart buy streams.
 
+`DEX PAID` only appears when DexScreener's paid-orders endpoint returns a paid order for the token.
+
+Reliability guardrails:
+
+- `ENABLE_KEEP_ALIVE=true` pings your Render URL so the app does not sleep.
+- `ENABLE_LISTENER_WATCHDOG=true` restarts PumpPortal, Bitquery, and native Solana listeners on a schedule.
+- `ENABLE_BUY_FAILSAFE_POLLING=true` uses DexScreener as a backup when no recent live alert has posted.
+- Check `https://your-render-app.onrender.com/api/debug/listeners` to see listener health, socket state, and last alert times.
+
 ## Send A Buy Event
 
 Use your secret in the `x-bot-secret` header:

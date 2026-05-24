@@ -51,7 +51,7 @@ export function renderBuyAlert({ coin, event, trending, primaryCoin, tokenMeta, 
     marketCap ? `<b>MCap:</b> ${escapeHtml(marketCap)}` : null,
     socialsLine ? `<b>Socials:</b> ${socialsLine}` : null,
     '',
-    renderDexPaidLine(event.dex),
+    renderDexPaidLine(tokenMeta?.dexPaid),
     '',
     [chartLine, txLine, buyLine].filter(Boolean).join(' | '),
     chatSettings.showTopMovers === false ? null : renderAdBlock({ trending, primaryCoin }),
@@ -161,18 +161,8 @@ function getCoinTheme(coin, tokenMeta, chatSettings = {}) {
   };
 }
 
-function renderDexPaidLine(dex) {
-  const cleanDex = cleanDexName(dex);
-  const label = cleanDex ? `DEX PAID | ${cleanDex}` : 'DEX PAID';
-  return `<b>[ ${escapeHtml(label)} ]</b>`;
-}
-
-function cleanDexName(dex) {
-  if (!dex) return '';
-  return String(dex)
-    .replace(/\s*aggregate\s*/gi, '')
-    .replace(/pumpfun/gi, 'Pump.fun')
-    .trim();
+function renderDexPaidLine(isDexPaid) {
+  return isDexPaid ? '<b>[ DEX PAID ]</b>' : null;
 }
 
 function renderSocials(coin, tokenMeta) {
