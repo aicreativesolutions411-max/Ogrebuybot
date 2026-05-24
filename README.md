@@ -105,8 +105,11 @@ Reliability guardrails:
 
 - `ENABLE_KEEP_ALIVE=true` pings your Render URL so the app does not sleep.
 - `ENABLE_LISTENER_WATCHDOG=true` restarts PumpPortal, Bitquery, and native Solana listeners on a schedule.
+- `ENABLE_GROUP_RECOVERY_WATCHDOG=true` rescans remembered/tracked groups every few minutes so a missing CA link can repair itself.
 - `ENABLE_BUY_FAILSAFE_POLLING=true` uses DexScreener as a backup when no recent live alert has posted.
-- Check `https://your-render-app.onrender.com/api/debug/listeners` to see listener health, socket state, and last alert times.
+- Check `https://your-render-app.onrender.com/api/debug/listeners` to see listener health, socket state, group recovery, and last alert times.
+- Check `https://your-render-app.onrender.com/api/debug/delivery/OGRE` to see every chat attached to `$OGRE` and why any chat would be skipped.
+- To manually force a group recovery scan, send a protected POST to `https://your-render-app.onrender.com/api/debug/recover-groups` with your `x-bot-secret`.
 
 ## Send A Buy Event
 

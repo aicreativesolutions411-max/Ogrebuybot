@@ -59,6 +59,10 @@ const {
   ENABLE_BUY_FAILSAFE_POLLING = 'true',
   BUY_FAILSAFE_POLL_INTERVAL_MS = 60000,
   BUY_FAILSAFE_RECENT_ALERT_MS = 120000,
+  ENABLE_GROUP_RECOVERY_WATCHDOG = 'true',
+  GROUP_RECOVERY_INTERVAL_MS = 300000,
+  REQUIRE_ADMIN_FOR_BUY_ALERTS = 'true',
+  ALLOW_SEND_ON_ADMIN_CHECK_ERROR = 'true',
   TELEGRAM_BACKUP_CHAT_ID,
   SOLANA_WS_URL,
   TELEGRAM_WEBHOOK_URL,
@@ -106,7 +110,18 @@ const listenerHealth = {
   bitquery: { startedAt: 0, lastMessageAt: 0, lastEventAt: 0 },
   pumpPortal: { startedAt: 0, lastMessageAt: 0, lastEventAt: 0 },
   native: { startedAt: 0, lastMessageAt: 0, lastEventAt: 0 },
+  groupRecovery: {
+    lastRunAt: 0,
+    lastRecoveredAt: 0,
+    checked: 0,
+    recovered: 0,
+    alreadyLinked: 0,
+    noContract: 0,
+    notAdmin: 0,
+    errors: 0
+  },
   lastBuyAlertAt: 0,
+  lastDeliveryFailureAt: 0,
   lastHeliusSyncAt: 0
 };
 const minBuySol = Math.max(0, Number(MIN_BUY_SOL) || 0.0001);
@@ -562,6 +577,40 @@ app.get('/api/debug/chat/:chatId', async (req, res) => {
   });
 });
 
+app.get('/api/debug/delivery/:target', async (req, res) => {
+  const target = String(req.params.target ?? '').replace(/^\$+/, '');
+  const coin = await getCoin(target) ?? await getCoinByContract(target);
+
+  if (!coin) {
+    res.status(404).json({ ok: false, error: 'Coin not found by symbol or CA.' });
+    return;
+  }
+
+  const delivery = await getAlertDeliveryStatus(coin);
+  res.json({
+    ok: true,
+    requireAdminForBuyAlerts: shouldRequireAdminForBuyAlerts(),
+    sendOnAdminCheckError: shouldSendOnAdminCheckError(),
+    coin: {
+      symbol: coin.symbol,
+      contract: coin.contract,
+      enabled: coin.enabled,
+      channels: getAlertChannels(coin)
+    },
+    delivery
+  });
+});
+
+app.post('/api/debug/recover-groups', async (req, res) => {
+  if (WEBHOOK_SECRET && req.header('x-bot-secret') !== WEBHOOK_SECRET) {
+    res.status(401).json({ error: 'Invalid secret' });
+    return;
+  }
+
+  const result = await recoverKnownChatTracking({ logSummary: true });
+  res.json({ ok: true, result });
+});
+
 app.get('/api/debug/pump/:contract', async (req, res) => {
   const meta = await getPumpFunMetadata(req.params.contract);
   res.json({
@@ -591,7 +640,9 @@ app.get('/api/debug/listeners', async (_req, res) => {
       dexScreener: String(ENABLE_DEXSCREENER_POLLING).toLowerCase() === 'true',
       failsafePolling: String(ENABLE_BUY_FAILSAFE_POLLING).toLowerCase() === 'true',
       watchdog: String(ENABLE_LISTENER_WATCHDOG).toLowerCase() === 'true',
-      keepAlive: String(ENABLE_KEEP_ALIVE).toLowerCase() === 'true'
+      groupRecoveryWatchdog: String(ENABLE_GROUP_RECOVERY_WATCHDOG).toLowerCase() === 'true',
+      keepAlive: String(ENABLE_KEEP_ALIVE).toLowerCase() === 'true',
+      requireAdminForBuyAlerts: shouldRequireAdminForBuyAlerts()
     },
     sockets: {
       bitquery: getSocketState(bitquerySocket),
@@ -1280,7 +1331,13 @@ function formatListenerHealth() {
       lastMessageAt: formatTime(listenerHealth.native.lastMessageAt),
       lastEventAt: formatTime(listenerHealth.native.lastEventAt)
     },
+    groupRecovery: {
+      ...listenerHealth.groupRecovery,
+      lastRunAt: formatTime(listenerHealth.groupRecovery.lastRunAt),
+      lastRecoveredAt: formatTime(listenerHealth.groupRecovery.lastRecoveredAt)
+    },
     lastBuyAlertAt: formatTime(listenerHealth.lastBuyAlertAt),
+    lastDeliveryFailureAt: formatTime(listenerHealth.lastDeliveryFailureAt),
     lastHeliusSyncAt: formatTime(listenerHealth.lastHeliusSyncAt)
   };
 }
@@ -1296,6 +1353,21 @@ function startListenerWatchdog() {
   setInterval(() => {
     runListenerWatchdog().catch((error) => {
       console.error('Listener watchdog check failed:', error.message);
+    });
+  }, interval);
+}
+
+function startGroupRecoveryWatchdog() {
+  const interval = Math.max(60000, Number(GROUP_RECOVERY_INTERVAL_MS) || 300000);
+  console.log(`Group recovery watchdog enabled. Rescanning known chats every ${interval}ms.`);
+
+  recoverKnownChatTracking({ logSummary: true }).catch((error) => {
+    console.error('Initial group recovery watchdog scan failed:', error.message);
+  });
+
+  setInterval(() => {
+    recoverKnownChatTracking({ logSummary: true }).catch((error) => {
+      console.error('Group recovery watchdog scan failed:', error.message);
     });
   }, interval);
 }
@@ -1714,9 +1786,13 @@ async function main() {
     { command: 'stopfilter', description: 'Delete an auto reply filter' }
   ]);
 
-  recoverKnownChatTracking().catch((error) => {
-    console.error('Known chat recovery failed:', error.message);
-  });
+  if (String(ENABLE_GROUP_RECOVERY_WATCHDOG).toLowerCase() === 'true') {
+    startGroupRecoveryWatchdog();
+  } else {
+    recoverKnownChatTracking({ logSummary: true }).catch((error) => {
+      console.error('Known chat recovery failed:', error.message);
+    });
+  }
 
   if (telegramWebhookUrl) {
     await bot.telegram.setWebhook(telegramWebhookUrl, {
@@ -3548,22 +3624,67 @@ async function rememberChat(chat, options = {}) {
   });
 }
 
-async function recoverKnownChatTracking() {
-  const chats = await getKnownChats();
-  if (chats.length === 0) return;
+async function recoverKnownChatTracking(options = {}) {
+  const [knownChats, trackedChats] = await Promise.all([
+    getKnownChats(),
+    getTrackedChats()
+  ]);
+  const chatMap = new Map();
 
-  let recovered = 0;
+  for (const chat of knownChats) {
+    chatMap.set(String(chat.id), chat);
+  }
+
+  for (const chat of trackedChats) {
+    if (!chatMap.has(String(chat.chatId))) {
+      chatMap.set(String(chat.chatId), {
+        id: String(chat.chatId),
+        title: '',
+        username: '',
+        type: 'unknown'
+      });
+    }
+  }
+
+  const chats = Array.from(chatMap.values());
+  const summary = {
+    checked: chats.length,
+    recovered: 0,
+    alreadyLinked: 0,
+    noContract: 0,
+    notAdmin: 0,
+    errors: 0
+  };
+
+  listenerHealth.groupRecovery.lastRunAt = Date.now();
+  if (chats.length === 0) {
+    updateGroupRecoveryHealth(summary);
+    return summary;
+  }
+
   for (const chat of chats) {
-    const existingCoins = await getCoinsByChat(chat.id);
-    if (existingCoins.length > 0) continue;
-
     try {
       const fullChat = await bot.telegram.getChat(chat.id);
       await rememberChat(fullChat, { force: true });
       const text = buildChatDiscoveryText({ chat, fullChat });
       const contract = extractBestSolanaContract(text, { allowBare: true });
-      if (!contract) continue;
-      if (!await isBotAdminInChat(chat.id)) continue;
+      if (!contract) {
+        summary.noContract += 1;
+        continue;
+      }
+
+      const status = await getBotChatStatus(chat.id);
+      if (shouldRequireAdminForBuyAlerts() && !status.isAdmin) {
+        summary.notAdmin += 1;
+        console.warn(`Known chat recovery skipped ${chat.id}; ${status.reason}.`);
+        continue;
+      }
+
+      const existingCoins = await getCoinsByChat(chat.id);
+      if (existingCoins.some((coin) => coin.contract?.toLowerCase() === contract.toLowerCase())) {
+        summary.alreadyLinked += 1;
+        continue;
+      }
 
       const coin = await autoTrackContractForChat({
         chatId: chat.id,
@@ -3574,18 +3695,40 @@ async function recoverKnownChatTracking() {
           console.error(`Could not send auto-recovery notice to ${chat.id}:`, error.message);
         })
       });
-      if (coin) recovered += 1;
+      if (coin) {
+        summary.recovered += 1;
+      } else {
+        summary.alreadyLinked += 1;
+      }
     } catch (error) {
+      summary.errors += 1;
       console.error(`Could not recover tracking for chat ${chat.id}:`, error.message);
     }
   }
 
-  if (recovered > 0) {
+  updateGroupRecoveryHealth(summary);
+
+  if (summary.recovered > 0) {
     restartBitqueryStreamSoon();
     restartPumpPortalStreamSoon();
     restartNativeSolanaWatcherSoon();
-    console.log(`Auto-recovered ${recovered} chat CA tracking setup(s).`);
+    console.log(`Auto-recovered ${summary.recovered} chat CA tracking setup(s).`);
+  } else if (options.logSummary && (summary.errors > 0 || summary.notAdmin > 0 || summary.noContract > 0)) {
+    console.log(`Group recovery scan: checked ${summary.checked}, linked ${summary.alreadyLinked}, no CA ${summary.noContract}, not admin ${summary.notAdmin}, errors ${summary.errors}.`);
   }
+
+  return summary;
+}
+
+function updateGroupRecoveryHealth(summary) {
+  listenerHealth.groupRecovery = {
+    ...listenerHealth.groupRecovery,
+    ...summary,
+    lastRunAt: Date.now(),
+    lastRecoveredAt: summary.recovered > 0
+      ? Date.now()
+      : listenerHealth.groupRecovery.lastRecoveredAt
+  };
 }
 
 async function getAutoTrackDiscoveryText(ctx, options = {}) {
@@ -3950,13 +4093,21 @@ async function postBuyAlert({ coin, eventInput }) {
     trending,
     primaryCoin,
     tokenMeta,
-    channels
+    delivery
   ] = await Promise.all([
     getTrendingCoins(Number(TRENDING_LIMIT)),
     getPrimaryCoin(),
     getCachedTokenMetadata(coin.contract),
-    getEligibleAlertChannels(coin)
+    getAlertDeliveryStatus(coin)
   ]);
+  const channels = delivery
+    .filter((item) => item.canPost)
+    .map((item) => item.chatId);
+  const skippedChannels = delivery.filter((item) => !item.canPost);
+
+  if (skippedChannels.length > 0) {
+    console.warn(`Skipping $${coin.symbol} buy alert for ${skippedChannels.length} configured chat(s): ${skippedChannels.map((item) => `${item.chatId} (${item.reason})`).join(', ')}`);
+  }
 
   const results = await Promise.allSettled(
     channels.map((chatId) => {
@@ -3970,6 +4121,8 @@ async function postBuyAlert({ coin, eventInput }) {
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
       console.error(`Failed to send $${coin.symbol} buy alert to chat ${channels[index]}:`, result.reason);
+      listenerHealth.lastDeliveryFailureAt = Date.now();
+      adminStatusCache.delete(String(channels[index]));
     }
   });
 
@@ -3977,7 +4130,7 @@ async function postBuyAlert({ coin, eventInput }) {
     listenerHealth.lastBuyAlertAt = Date.now();
   }
 
-  return { event, results, channels };
+  return { event, results, channels, skippedChannels };
 }
 
 async function sendBuyAlertToChat(chatId, message, media) {
@@ -4042,42 +4195,80 @@ function isSellLikeEvent(eventInput = {}) {
 }
 
 async function getEligibleAlertChannels(coin) {
-  const configuredChannels = getAlertChannels(coin);
-  const results = await Promise.all(
-    configuredChannels.map(async (chatId) => ({
-      chatId,
-      isAdmin: await isBotAdminInChat(chatId)
-    }))
-  );
-
+  const results = await getAlertDeliveryStatus(coin);
   return results
-    .filter((result) => result.isAdmin)
+    .filter((result) => result.canPost)
     .map((result) => result.chatId);
 }
 
+async function getAlertDeliveryStatus(coin) {
+  const configuredChannels = getAlertChannels(coin);
+  return Promise.all(configuredChannels.map((chatId) => getBotChatStatus(chatId)));
+}
+
 async function isBotAdminInChat(chatId) {
+  const status = await getBotChatStatus(chatId);
+  return status.isAdmin;
+}
+
+async function getBotChatStatus(chatId) {
   const normalizedChatId = String(chatId);
   const cached = adminStatusCache.get(normalizedChatId);
   if (cached && cached.expiresAt > Date.now()) {
-    return cached.isAdmin;
+    return cached;
   }
 
   try {
     const member = await bot.telegram.getChatMember(chatId, botId ?? bot.botInfo?.id);
+    const status = member.status ?? 'unknown';
     const isAdmin = ['administrator', 'creator'].includes(member.status);
-    adminStatusCache.set(normalizedChatId, {
+    const canPost = shouldRequireAdminForBuyAlerts()
+      ? isAdmin
+      : ['administrator', 'creator', 'member'].includes(status);
+    const result = {
+      chatId: normalizedChatId,
+      status,
       isAdmin,
+      canPost,
+      reason: canPost
+        ? 'ok'
+        : shouldRequireAdminForBuyAlerts()
+          ? `bot status is ${status}; admin required`
+          : `bot status is ${status}`
+    };
+
+    adminStatusCache.set(normalizedChatId, {
+      ...result,
       expiresAt: Date.now() + Math.max(0, Number(ADMIN_STATUS_CACHE_MS) || 300000)
     });
-    return isAdmin;
+    return result;
   } catch (error) {
-    console.error(`Skipping buy alert for chat ${chatId}; bot admin check failed:`, error.message);
-    adminStatusCache.set(normalizedChatId, {
+    const canPost = shouldSendOnAdminCheckError();
+    const result = {
+      chatId: normalizedChatId,
+      status: 'unknown',
       isAdmin: false,
+      canPost,
+      reason: canPost
+        ? `admin check failed; attempting send anyway: ${error.message}`
+        : `admin check failed: ${error.message}`
+    };
+
+    console.error(`Bot status check failed for chat ${chatId}:`, error.message);
+    adminStatusCache.set(normalizedChatId, {
+      ...result,
       expiresAt: Date.now() + 30000
     });
-    return false;
+    return result;
   }
+}
+
+function shouldRequireAdminForBuyAlerts() {
+  return String(REQUIRE_ADMIN_FOR_BUY_ALERTS).toLowerCase() !== 'false';
+}
+
+function shouldSendOnAdminCheckError() {
+  return String(ALLOW_SEND_ON_ADMIN_CHECK_ERROR).toLowerCase() !== 'false';
 }
 
 async function parseHeliusTransaction(transaction) {

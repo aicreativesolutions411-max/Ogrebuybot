@@ -164,7 +164,7 @@ If the command menu does not show right away in Telegram, restart the bot and wa
 
    The menu stays in one Telegram message. Use the submenu buttons for Protection, Welcome, Rules & Notes, Filters, and Chat Tools, then use Back to keep making changes without spamming the chat.
 
-The bot also self-heals CA setup after restarts. It remembers groups/channels it sees and checks pinned messages, chat descriptions, replies, and Pump.fun links for a CA when a chat has no tracked coin.
+The bot also self-heals CA setup after restarts. It remembers groups/channels it sees, scans every chat already attached to a tracked coin, and checks pinned messages, chat descriptions, replies, and Pump.fun links for a CA.
 
 The `DEX PAID` badge is checked through DexScreener paid orders and only shows when a paid order exists.
 
@@ -180,11 +180,21 @@ LISTENER_WATCHDOG_INTERVAL_MS=60000
 LISTENER_PERIODIC_RESTART_MS=1800000
 ENABLE_BUY_FAILSAFE_POLLING=true
 BUY_FAILSAFE_POLL_INTERVAL_MS=60000
+ENABLE_GROUP_RECOVERY_WATCHDOG=true
+GROUP_RECOVERY_INTERVAL_MS=300000
+REQUIRE_ADMIN_FOR_BUY_ALERTS=true
+ALLOW_SEND_ON_ADMIN_CHECK_ERROR=true
 ```
 
-Open this URL to check listener health:
+Open this URL to check listener health and group recovery status:
 
 `https://your-render-app.onrender.com/api/debug/listeners`
+
+Open this URL to see why a specific coin is or is not posting to each group:
+
+`https://your-render-app.onrender.com/api/debug/delivery/OGRE`
+
+To force a recovery scan manually, POST to `/api/debug/recover-groups` with your `x-bot-secret` header.
 
 4. Optional setup commands:
 
